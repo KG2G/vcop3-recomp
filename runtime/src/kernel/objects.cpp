@@ -1,3 +1,4 @@
+#include "platform.h"
 #include "objects.h"
 
 #include <chrono>
@@ -13,7 +14,16 @@ namespace vc3::kernel {
 
 namespace {
 std::mutex g_kmutex;
-std::condition_variable g_kcv;
+// Threads blocked in wait_for_objects, each woken through its own wake-up object when any
+// object is signalled (they re-check their own objects). Faster than one shared condition
+// variable on Windows, where a thread wake-up costs much more (see scheduler.cpp).
+#ifdef _WIN32
+thread_local void* t_kwake = platform::make_event();
+std::vector<void*> g_kwaiting;  // guarded by g_kmutex
+#else
+thread_local std::condition_variable t_kwake;
+std::vector<std::condition_variable*> g_kwaiting;  // guarded by g_kmutex
+#endif
 std::unordered_map<u32, std::pair<u32, std::shared_ptr<HostObject>>> g_handles;
 u32 g_next_handle = 0x100;
 }  // namespace
@@ -26,7 +36,20 @@ std::mutex& kmutex() { return g_kmutex; }
 // and a changed generation satisfies them.
 std::unordered_map<u32, u64> g_pulse_gen;
 std::unordered_map<u32, int> g_blocked;  // threads currently blocked on each object
-void notify_waiters() { g_kcv.notify_all(); }
+void notify_waiters() {
+#ifdef _WIN32
+    void* wake[64];
+    size_t n = 0;
+    {
+        std::lock_guard lk(g_kmutex);
+        for (void* h : g_kwaiting) if (n < 64) wake[n++] = h;
+    }
+    for (size_t i = 0; i < n; ++i) platform::set_event(wake[i]);  // (the events live as long as their threads)
+#else
+    std::lock_guard lk(g_kmutex);
+    for (std::condition_variable* cv : g_kwaiting) cv->notify_one();  // under the lock: waiters can't go meanwhile
+#endif
+}
 
 void init_dispatcher_header(u32 obj, u8 type, u8 size_dwords, s32 signal) {
     wr<u8>(obj + kHdrType, type);
@@ -156,17 +179,29 @@ u32 wait_for_objects(const std::vector<u32>& objs, bool wait_all, std::optional<
     std::optional<u32> result;
     {
     Unblock unblock{objs};
+#ifdef _WIN32
+    g_kwaiting.push_back(t_kwake);
+    struct Unregister { ~Unregister() { std::erase(g_kwaiting, t_kwake); } } unregister;  // (lk held at exit)
+#else
+    g_kwaiting.push_back(&t_kwake);
+    struct Unregister { ~Unregister() { std::erase(g_kwaiting, &t_kwake); } } unregister;
+#endif
     for (;;) {
         if ((result = try_satisfy()) || (result = pulsed())) break;
-        if (deadline) {
-            if (g_kcv.wait_until(lk, *deadline) == std::cv_status::timeout && !(result = try_satisfy()) && !(result = pulsed())) {
-                result = STATUS_TIMEOUT;
-                break;
-            }
-            if (result) break;
-        } else {
-            g_kcv.wait(lk);
+        if (deadline && steady_clock::now() >= *deadline) {
+            result = STATUS_TIMEOUT;
+            break;
         }
+#ifdef _WIN32
+        unsigned ms = ~0u;
+        if (deadline) ms = unsigned(std::max<s64>(0, (duration_cast<microseconds>(*deadline - steady_clock::now()).count() + 999) / 1000));
+        lk.unlock();
+        platform::wait_event(t_kwake, ms);
+        lk.lock();
+#else
+        if (deadline) t_kwake.wait_until(lk, platform::coarse_sleep() ? *deadline + std::chrono::microseconds(1500) : *deadline);
+        else t_kwake.wait(lk);
+#endif
     }
     }
     lk.unlock();

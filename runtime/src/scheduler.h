@@ -44,6 +44,8 @@ void yield_to_equals();
 void preempt_for(int prio);
 // A guest thread's priority changed: re-rank waiters (and preempt if needed).
 void priority_changed();
+// Handoffs since the last call: how long from being granted the lock to running (for the log).
+void take_handoff_stats(double& avg_us, double& max_us, unsigned long long& count);
 
 // Hitch diagnostics: the longest single guest-lock hold since the last call (ns) and
 // the holder's priority; and cumulative host file-read time.

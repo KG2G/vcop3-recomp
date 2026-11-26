@@ -5,6 +5,7 @@
 #include <SDL3/SDL.h>
 
 #include <cstdint>
+#include <string>
 
 namespace vc3::io {
 
@@ -26,11 +27,20 @@ void aim_point(int gun, float& x, float& y);
 //   aim1|aim2 <x 0..1> <y 0..1>
 // Called once per vblank from the video timing thread.
 void script_tick(uint64_t vblank);
-CabinetState state();  // thread-safe snapshot
+CabinetState state();  // thread-safe snapshot (buttons: what the game is being shown)
+// The game polls the controls (one I/O board message).
+void begin_poll();
+unsigned long long poll_count();  // polls so far (for the log)
 
 // Live input (io/input.cpp). Aim in 640x480 screen pixels (off-screen positions allowed).
-void set_player(int p, float x, float y, bool trigger, bool offscreen, bool pedal, bool change, bool start);
-void set_coin(int slot, bool down);
+void set_player(int p, float x, float y, bool offscreen);
+// A button's level now and how often it was pressed since the last call (a press already let
+// go still shows for the game's next poll).
+enum Button { kTrigger, kPedal, kChange, kStart, kCoin };
+// press_event_ns: when the first of those presses happened, now_ns: now (SDL_GetTicksNS
+// clock; 0 = unknown), for the timing in the log.
+void set_button(int p, Button b, int presses, bool down, long long press_event_ns = 0, long long now_ns = 0);
+std::string timing_report();  // input timing since the last call, for the log
 void set_test_service(bool test, bool service);
 bool scripted();  // an input script is running: live input stays off
 

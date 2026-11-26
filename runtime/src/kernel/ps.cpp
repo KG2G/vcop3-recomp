@@ -1,3 +1,4 @@
+#include "platform.h"
 #include "ps.h"
 
 #include <algorithm>
@@ -258,7 +259,7 @@ KEXPORT(KeDelayExecutionThread) {
         return STATUS_SUCCESS;
     }
     sched::Unlocked unlocked;
-    std::this_thread::sleep_for(std::chrono::nanoseconds(rel * 100));
+    platform::sleep_for(std::chrono::nanoseconds(rel * 100));
     return STATUS_SUCCESS;
 }
 

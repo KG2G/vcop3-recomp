@@ -11,6 +11,7 @@
 
 #ifdef _WIN32
 #include <io.h>
+#include "platform.h"
 #include <mutex>
 // Windows: files open in binary mode (no newline translation), and the POSIX calls the
 // MSVC runtime lacks, done with seek + read/write under a lock (guest threads share fds).
@@ -27,7 +28,11 @@ ssize_t pwrite(int fd, const void* buf, size_t n, long long off) {
     if (_lseeki64(fd, off, SEEK_SET) < 0) return -1;
     return _write(fd, buf, unsigned(n));
 }
-int ftruncate(int fd, long long size) { return _chsize_s(fd, size) == 0 ? 0 : -1; }
+// Set the file's size without writing it: the C runtime's _chsize_s fills the new part with
+// zeros, which for the hard-disk images is ~16 GB written (minutes on a hard drive, a black
+// screen meanwhile). Marked sparse first, unwritten parts take no space and read as zeros,
+// as on Linux.
+int ftruncate(int fd, long long size) { return vc3::platform::set_file_size(fd, size) ? 0 : -1; }
 }  // namespace
 #else
 #define VC3_OBIN 0
@@ -87,6 +92,11 @@ void init_namespace() {
     const char* root = std::getenv("VC3_GAME_DIR");
     const fs::path game = root ? root : "work/fs";
     const fs::path hdd = "work/hdd";
+    // Not where the game isn't (yet): the launcher can still switch to another folder.
+    if (!root && !fs::exists(game)) {
+        done_for.clear();
+        return;
+    }
     fs::create_directories(hdd);
     // The game image is read-only media, exposed the way a disc would be.
     g_devices["\\device\\cdrom0"] = Device{game, {}, 0, 0};

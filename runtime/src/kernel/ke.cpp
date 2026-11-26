@@ -1,4 +1,5 @@
 // Ke*: time, timers, DPCs, interrupts, misc.
+#include "platform.h"
 #include "ke.h"
 
 #include <algorithm>
@@ -123,6 +124,7 @@ void worker() {
 
         auto next = Clock::now() + std::chrono::milliseconds(1);
         for (const auto& [t, due] : g_timers) next = std::min(next, due);
+        if (platform::coarse_sleep()) next += std::chrono::microseconds(1500);  // (testing: Windows-like)
         g_cv.wait_until(lk, next);
     }
 }

@@ -34,6 +34,8 @@ void handle_event(const SDL_Event& e);
 void update();
 
 // Player p's aim (game pixels) and whether they have a working aim device (crosshair).
+// The longest gap between input updates (window loop) since the last call, for the log.
+double take_loop_gap_ms();
 bool crosshair(int p, float& x, float& y);
 
 // Devices for the launcher.

@@ -5,6 +5,7 @@
 // EDs from the HCCA table, then the control and bulk lists. Completed TDs go
 // to the done queue, which is written back to the HCCA with a WDH interrupt.
 // Descriptors live in guest physical memory (== guest address in low RAM).
+#include "platform.h"
 #include "ohci.h"
 
 #include <chrono>
@@ -283,7 +284,7 @@ void init() {
         auto next = std::chrono::steady_clock::now();
         for (;;) {
             next += std::chrono::milliseconds(1);
-            std::this_thread::sleep_until(next);
+            platform::sleep_until(next);
             // Like real hardware, the controller runs independently of the CPU
             // (it must not need the guest lock: drivers spin on it at raised IRQL).
             for (auto& h : g_hc) h.run_frame();

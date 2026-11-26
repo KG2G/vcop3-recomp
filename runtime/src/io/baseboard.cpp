@@ -57,6 +57,7 @@ public:
             r = {0x01, 0x01};
         } else if (dest == 0xFF || int(dest) == address_) {
             r.push_back(0x01);  // status: normal
+            begin_poll();
             poll_coins();
             size_t i = 0;
             while (i < n) {

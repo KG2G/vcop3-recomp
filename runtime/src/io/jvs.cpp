@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <atomic>
+#include <chrono>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -15,6 +16,37 @@ namespace vc3::io {
 
 static std::mutex g_m;
 static CabinetState g_state;
+
+// Live buttons pass straight through as levels (as on real hardware). The one addition: a
+// press already let go before the game's next poll (a click shorter than the gap between
+// polls) still shows for that one poll, then clears; nothing is ever held back or queued.
+struct LiveButton {
+    bool down = false;
+    bool tap = false, tap_shown = false;
+    bool shown() const { return down || tap; }
+    void set(int presses, bool now) {
+        if (presses > 0 && !now) {
+            tap = true;
+            tap_shown = false;
+        }
+        down = now;
+    }
+    void poll() {  // a poll starts: a tap the last poll showed is done
+        if (tap && tap_shown) tap = false;
+        else if (tap) tap_shown = true;
+    }
+};
+struct LiveButtons {
+    LiveButton trigger[2], pedal[2], change[2], start[2], coin[2];
+};
+static LiveButtons g_q;
+
+// Timing for the log: polls (gaps between them) and how long a press takes from the input
+// event to the game's next poll.
+using StatClock = std::chrono::steady_clock;
+static StatClock::time_point g_last_poll{}, g_press_waiting{};
+static double g_poll_gap_max = 0, g_press_sum = 0, g_press_max = 0;
+static unsigned g_press_n = 0;
 
 // Screen position (0..1 across the 640x480 frame) -> raw 16-bit gun channel.
 //
@@ -71,7 +103,52 @@ static const bool g_aim_init = [] {
 
 CabinetState state() {
     std::lock_guard lk(g_m);
-    return g_state;
+    CabinetState st = g_state;
+    if (scripted()) return st;  // test scripts set exact levels per vblank
+    for (int p = 0; p < 2; ++p) {
+        st.gun[p].trigger = g_q.trigger[p].shown();
+        st.gun[p].pedal = g_q.pedal[p].shown();
+        st.gun[p].change = g_q.change[p].shown();
+        st.gun[p].start = g_q.start[p].shown();
+        st.coin[p] = g_q.coin[p].shown();
+    }
+    return st;
+}
+
+std::atomic<unsigned long long> g_polls{0};
+unsigned long long poll_count() { return g_polls.load(); }
+
+std::string timing_report() {
+    std::lock_guard lk(g_m);
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "longest gap between polls %.0f ms; press to game avg %.0f ms, worst %.0f ms (%u presses)",
+                  g_poll_gap_max, g_press_n ? g_press_sum / g_press_n : 0.0, g_press_max, g_press_n);
+    g_poll_gap_max = g_press_sum = g_press_max = 0;
+    g_press_n = 0;
+    return buf;
+}
+
+void begin_poll() {
+    ++g_polls;
+    std::lock_guard lk(g_m);
+    const auto now = StatClock::now();
+    if (g_last_poll.time_since_epoch().count())
+        g_poll_gap_max = std::max(g_poll_gap_max, std::chrono::duration<double, std::milli>(now - g_last_poll).count());
+    g_last_poll = now;
+    if (g_press_waiting.time_since_epoch().count()) {
+        const double ms = std::chrono::duration<double, std::milli>(now - g_press_waiting).count();
+        g_press_sum += ms;
+        g_press_max = std::max(g_press_max, ms);
+        ++g_press_n;
+        g_press_waiting = {};
+    }
+    for (int p = 0; p < 2; ++p) {
+        g_q.trigger[p].poll();
+        g_q.pedal[p].poll();
+        g_q.change[p].poll();
+        g_q.start[p].poll();
+        g_q.coin[p].poll();
+    }
 }
 
 
@@ -153,19 +230,21 @@ void script_tick(uint64_t vblank) {
     }
 }
 
-void set_player(int p, float x, float y, bool trigger, bool offscreen, bool pedal, bool change, bool start) {
+void set_player(int p, float x, float y, bool offscreen) {
     std::lock_guard lk(g_m);
     GunState& g = g_state.gun[p & 1];
     set_aim(g, x / 640.0f, y / 480.0f);
-    g.trigger = trigger;  // (reload: input.cpp sequences the trigger after the screen sensor)
     g.offscreen = offscreen;
-    g.pedal = pedal;
-    g.change = change;
-    g.start = start;
 }
-void set_coin(int slot, bool down) {
+void set_button(int p, Button b, int presses, bool down, long long press_event_ns, long long now_ns) {
     std::lock_guard lk(g_m);
-    g_state.coin[slot & 1] = down;
+    const int i = p & 1;
+    LiveButton* q[] = {&g_q.trigger[i], &g_q.pedal[i], &g_q.change[i], &g_q.start[i], &g_q.coin[i]};
+    q[b]->set(presses, down);
+    if (presses > 0 && press_event_ns) {  // input event -> now, then now -> the next poll
+        const auto age = std::chrono::nanoseconds(std::max<long long>(0, now_ns - press_event_ns));
+        if (!g_press_waiting.time_since_epoch().count()) g_press_waiting = StatClock::now() - age;
+    }
 }
 void set_test_service(bool test, bool service) {
     std::lock_guard lk(g_m);

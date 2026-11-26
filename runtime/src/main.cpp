@@ -82,6 +82,7 @@ void capture() {
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);  // keep logs when the guest aborts
+    platform::init_process();
     std::string xbe_path = "work/fs/vc3.xbe";
     bool headless = false, want_launcher = false, no_launcher = false, no_settings = false;
     std::string install_pic, install_chd;

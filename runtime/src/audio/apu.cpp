@@ -1,3 +1,4 @@
+#include "platform.h"
 #include "apu.h"
 
 #include <SDL3/SDL.h>
@@ -823,7 +824,7 @@ void frame_thread() {
             next += kChunk;
             const auto now = Clock::now();
             if (now > next + std::chrono::milliseconds(100)) next = now;  // fell far behind: resync
-            std::this_thread::sleep_until(next);
+            platform::sleep_until(next);
         }
 
         bool any = false;

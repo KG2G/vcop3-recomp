@@ -1,5 +1,10 @@
 #include "scheduler.h"
 
+#ifdef _WIN32
+#include <immintrin.h>
+#endif
+#include "platform.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -29,21 +34,39 @@ constexpr int kHostPriority = 64;
 // A queued thread's priority is read live from its source, so raising the
 // priority of a thread that is already waiting for the lock (CRI boosts its idle
 // thread that way) takes effect immediately.
+//
+// Handing the lock over wakes only the thread that gets it, through its own wake-up
+// object. Thread wake-ups are slow on Windows (MinGW's condition variables, the OS
+// scheduler), and the game hands the lock over hundreds of times a second: waking every
+// waiter on each handoff (and the slower wake-up there) cost Windows about one frame in
+// six (laggy input, late coins). There a waiter also spins briefly before sleeping.
+#ifdef _WIN32
+thread_local void* t_wake = platform::make_event();  // auto-reset; lives with the thread
+#else
+thread_local std::condition_variable t_wake;
+#endif
 struct Waiter {
     const std::atomic<int>* source;
     int fixed;  // priority for threads without a source
     int64_t seq;  // order within a priority: lower first (front placements are negative)
-    bool granted = false;
+    std::atomic<bool> granted{false};
+    int64_t granted_at = 0;  // steady-clock ns (handoff timing for the log)
+#ifdef _WIN32
+    void* wake = t_wake;
+#else
+    std::condition_variable* wake = &t_wake;
+#endif
     int priority() const { return source ? source->load(std::memory_order_relaxed) : fixed; }
 };
 
 std::mutex g_m;
-std::condition_variable g_cv;
 bool g_owned = false;
 int g_owner_priority = 0;
 int64_t g_seq = 0, g_front_seq = 0;
 std::vector<Waiter*> g_waiters;
 std::atomic<int> g_best_waiting{INT_MIN};  // highest priority among waiters (INT_MIN: none)
+// Handoff timing for the log: from being granted the lock to running.
+std::atomic<unsigned long long> g_handoffs{0}, g_handoff_ns_sum{0}, g_handoff_ns_max{0};
 std::atomic<int64_t> g_owner_since{0};      // steady-clock ns when the current owner got the lock
 void (*g_hook)() = nullptr;
 bool g_fifo = false;  // VC3_SCHED_FIFO=1: ignore priorities (the old behaviour; debugging aid)
@@ -118,7 +141,22 @@ static void acquire_raw(bool front = false) {
     // A higher-priority thread became ready: ask the running one to yield at its next
     // back-edge instead of waiting for the time slice to end.
     if (g_owned && prio > g_owner_priority) g_yield_request.store(true, std::memory_order_relaxed);
-    g_cv.wait(lk, [&] { return w.granted; });
+#ifdef _WIN32
+    lk.unlock();
+    // A handoff that comes within a few microseconds needs no OS wake-up at all.
+    for (int i = 0; i < 2000 && !w.granted.load(std::memory_order_acquire); ++i) _mm_pause();
+    while (!w.granted.load(std::memory_order_acquire)) platform::wait_event(w.wake, ~0u);
+#else
+    w.wake->wait(lk, [&] { return w.granted.load(std::memory_order_relaxed); });
+    lk.unlock();
+#endif
+    {
+        const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+        const auto ns = uint64_t(std::max<int64_t>(0, now - w.granted_at));
+        ++g_handoffs;
+        g_handoff_ns_sum += ns;
+        if (ns > g_handoff_ns_max.load(std::memory_order_relaxed)) g_handoff_ns_max.store(ns, std::memory_order_relaxed);
+    }
     t_acquired = std::chrono::steady_clock::now();
 }
 
@@ -143,6 +181,9 @@ void take_max_hold(uint64_t& ns, int& priority) {
 }
 
 void gil_release() {
+#ifdef _WIN32
+    void* wake_after = nullptr;
+#endif
     {
         const uint64_t held = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - t_acquired).count());
@@ -170,13 +211,31 @@ void gil_release() {
             Waiter* w = g_waiters[best];
             g_waiters.erase(g_waiters.begin() + std::ptrdiff_t(best));
             update_best();
-            w->granted = true;
-            g_owner_since.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
+            const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+            g_owner_since.store(now, std::memory_order_relaxed);
             g_owned = true;
             g_owner_priority = g_fifo ? 0 : w->priority();
+            w->granted_at = now;
+#ifdef _WIN32
+            void* const wake = w->wake;  // (w may be gone once granted: copy first)
+            w->granted.store(true, std::memory_order_release);
+            wake_after = wake;
+#else
+            w->granted.store(true, std::memory_order_relaxed);
+            w->wake->notify_one();  // under the lock: the waiter can't return (and go) before
+#endif
         }
     }
-    g_cv.notify_all();
+#ifdef _WIN32
+    if (wake_after) platform::set_event(wake_after);
+#endif
+}
+
+void take_handoff_stats(double& avg_us, double& max_us, unsigned long long& count) {
+    count = g_handoffs.exchange(0);
+    const unsigned long long sum = g_handoff_ns_sum.exchange(0);
+    avg_us = count ? double(sum) / double(count) / 1e3 : 0;
+    max_us = double(g_handoff_ns_max.exchange(0)) / 1e3;
 }
 
 void start_preemption() {

@@ -1,4 +1,6 @@
 #include "log.h"
+#include "io/jvs.h"
+#include "io/input.h"
 #ifdef VC3_HAVE_VULKAN
 #include "gpu/vk_present.h"
 #endif
@@ -163,9 +165,18 @@ void note_frame_light() {
     over20 += ms > 20.0;
     over33 += ms > 33.0;
     if (now - report > std::chrono::seconds(60)) {
-        std::fprintf(stderr, "[perf] %.0f s: last minute %llu frames, avg %.1f ms, worst %.0f ms, over 20 ms: %llu, over 33 ms: %llu\n",
+        static unsigned long long last_polls = 0;
+        const unsigned long long polls = io::poll_count();
+        const double secs = std::chrono::duration<double>(now - report).count();
+        std::fprintf(stderr, "[perf] %.0f s: last minute %llu frames, avg %.1f ms, worst %.0f ms, over 20 ms: %llu, over 33 ms: %llu; I/O polls %.1f/s\n",
                      log::uptime(), (unsigned long long)n, sum / double(n), worst, (unsigned long long)over20,
-                     (unsigned long long)over33);
+                     (unsigned long long)over33, double(polls - last_polls) / secs);
+        last_polls = polls;
+        double h_avg, h_max;
+        unsigned long long h_n;
+        sched::take_handoff_stats(h_avg, h_max, h_n);
+        std::fprintf(stderr, "[perf] input: %s; longest window-loop gap %.0f ms; thread handoffs %.0f/s, avg %.0f us, worst %.0f us\n",
+                     io::timing_report().c_str(), io::input::take_loop_gap_ms(), double(h_n) / secs, h_avg, h_max);
         report = now;
         n = over20 = over33 = 0;
         worst = sum = 0;
@@ -493,7 +504,7 @@ void vblank_thread() {
         next += std::chrono::nanoseconds(s64(period));
         const auto now = Clock::now();
         if (now > next + std::chrono::milliseconds(50)) next = now;  // fell far behind: resync
-        std::this_thread::sleep_until(next);
+        platform::sleep_until(next);
         std::lock_guard lk(g.m);
         ++g.frames;
         g_display_start = g.pcrtc_start;

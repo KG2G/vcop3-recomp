@@ -60,6 +60,7 @@ struct RawState {
     std::string name;
     std::atomic<float> x{320}, y{240};  // game pixels
     std::atomic<unsigned> buttons{0};   // bit 0 left, 1 right, 2 middle, 3 x1, 4 x2
+    std::atomic<int> presses[16] = {};  // per button: presses since update() last took them
 };
 std::mutex g_raw_m;
 std::map<std::string, RawState*> g_raw;  // by name ("Name" or "Name #2")
@@ -165,8 +166,12 @@ void run_evdev(EvDev dev, RawState* st) {
                     default: break;
                 }
                 if (bit >= 0) {
-                    if (e.value) st->buttons |= 1u << bit;
-                    else st->buttons &= ~(1u << bit);
+                    if (e.value) {
+                        st->buttons |= 1u << bit;
+                        ++st->presses[bit];
+                    } else {
+                        st->buttons &= ~(1u << bit);
+                    }
                 }
             }
         }
@@ -279,8 +284,12 @@ void run_wii(WiiDev w, RawState* st) {
                         default: break;
                     }
                     if (bit >= 0) {
-                        if (e.value) st->buttons |= 1u << bit;
-                        else st->buttons &= ~(1u << bit);
+                        if (e.value) {
+                            st->buttons |= 1u << bit;
+                            ++st->presses[bit];
+                        } else {
+                            st->buttons &= ~(1u << bit);
+                        }
                     }
                 }
             }
@@ -324,12 +333,15 @@ struct Player {
     std::vector<Input> bind[6];
     float x = 320, y = 240;  // aim (game pixels)
     unsigned mouse_buttons = 0;  // system mouse (players aiming with it)
+    int presses[6] = {};         // per action: presses since the last update()
+    Uint64 press_ns[6] = {};     // when the first of them happened (event time, for the log)
 };
 Player g_p[2];
 std::vector<SDL_Gamepad*> g_pads;  // connection order
 std::vector<SDL_Keycode> g_keys_down;
 std::vector<Input> g_test_bind, g_service_bind;  // cabinet buttons (keys; gamepad 1)
 Uint64 g_last_tick = 0;
+Uint64 g_loop_gap_max_ns = 0;  // longest time between update() calls since the last report
 
 bool pad_aim(const Player& p) { return p.aim == "pad" || p.aim == "pad_left"; }
 // The system mouse drives the players aiming with it; when none does, it also moves (and its
@@ -444,6 +456,25 @@ void init() {
     g_last_tick = SDL_GetTicksNS();
 }
 
+// A button went down: count a press for every action bound to it (update() hands each press
+// to the game, so presses shorter than one update, or several within one, all count).
+void count_press(Input::Kind kind, int code, Uint64 when_ns, SDL_JoystickID pad = 0) {
+    for (int i = 0; i < 2; ++i) {
+        Player& p = g_p[i];
+        if (kind == Input::kMouse && (p.raw || !takes_system_mouse(i))) continue;
+        if (kind == Input::kPad) {
+            SDL_Gamepad* g = player_pad(p);
+            if (!g || SDL_GetGamepadID(g) != pad) continue;
+        }
+        for (int a = 0; a < 6; ++a)
+            for (const Input& in : p.bind[a])
+                if (in.kind == kind && in.code == code) {
+                    if (!p.presses[a]++) p.press_ns[a] = when_ns;
+                    break;
+                }
+    }
+}
+
 void handle_event(const SDL_Event& e) {
     switch (e.type) {
         case SDL_EVENT_MOUSE_MOTION:  // already in game coordinates (gpu::to_screen_coords)
@@ -465,6 +496,7 @@ void handle_event(const SDL_Event& e) {
                 default: break;
             }
             if (bit < 0) break;
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) count_press(Input::kMouse, bit, e.button.timestamp);
             for (int i = 0; i < 2; ++i) {
                 if (!takes_system_mouse(i)) continue;
                 Player& p = g_p[i];
@@ -476,6 +508,20 @@ void handle_event(const SDL_Event& e) {
         case SDL_EVENT_KEY_DOWN:
             if (e.key.repeat) break;
             if (std::find(g_keys_down.begin(), g_keys_down.end(), e.key.key) == g_keys_down.end()) g_keys_down.push_back(e.key.key);
+            count_press(Input::kKey, int(e.key.key), e.key.timestamp);
+            break;
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+            count_press(Input::kPad, int(e.gbutton.button), e.gbutton.timestamp, e.gbutton.which);
+            break;
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION:  // analog triggers bound as buttons: count each pull
+            if (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || e.gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) {
+                static std::map<std::pair<SDL_JoystickID, int>, bool> pulled;
+                bool& was = pulled[{e.gaxis.which, int(e.gaxis.axis)}];
+                const bool now = e.gaxis.value > 16000;
+                if (now && !was)
+                    count_press(Input::kPad, e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ? 100 : 101, e.gaxis.timestamp, e.gaxis.which);
+                was = now;
+            }
             break;
         case SDL_EVENT_KEY_UP:
             std::erase(g_keys_down, e.key.key);
@@ -507,9 +553,14 @@ void handle_event(const SDL_Event& e) {
 void update() {
     if (io::scripted()) return;  // scripted test input drives the cabinet
     const Uint64 now = SDL_GetTicksNS();
+    g_loop_gap_max_ns = std::max(g_loop_gap_max_ns, now - g_last_tick);  // (for the log)
     const float dt = std::min(0.1f, float(now - g_last_tick) * 1e-9f);
     g_last_tick = now;
-    bool coin[2] = {false, false};
+    // Presses on raw devices (counted by their reader threads), taken once per device.
+    int raw_presses[2][16] = {};
+    for (int i = 0; i < 2; ++i)
+        if (RawState* r = g_p[i].raw; r && !(i == 1 && g_p[0].raw == r))
+            for (int b = 0; b < 16; ++b) raw_presses[i][b] = r->presses[b].exchange(0);
     for (int i = 0; i < 2; ++i) {
         Player& p = g_p[i];
         // Aim
@@ -534,22 +585,27 @@ void update() {
             }
         }
         bool st[6];
+        int pr[6];
         for (int a = 0; a < 6; ++a) {
             st[a] = false;
-            for (const Input& in : p.bind[a]) st[a] = st[a] || held(p, in);
-        }
-        if (p.aim == "none" && !st[0] && !st[1] && !st[2] && !st[3] && !st[4] && !st[5]) {
-            io::set_player(i, p.x, p.y, false, false, false, false, false);
-            continue;
+            pr[a] = p.presses[a];
+            p.presses[a] = 0;
+            for (const Input& in : p.bind[a]) {
+                st[a] = st[a] || held(p, in);
+                if (in.kind == Input::kMouse && p.raw && in.code < 16) pr[a] += raw_presses[i][in.code];
+            }
         }
         // Reload = the gun's screen sensor reading "off screen"; the game reloads from that
         // alone. No trigger with it: an automatic weapon (G36C) keeps a trigger pull made off
         // screen and fires that round once the gun points back at the screen.
-        io::set_player(i, p.x, p.y, st[0], st[1], st[2], st[3], st[4]);
-        coin[i] = st[5];
+        io::set_player(i, p.x, p.y, st[1]);
+        const long long t = (long long)now;
+        io::set_button(i, io::kTrigger, pr[0], st[0], (long long)p.press_ns[0], t);
+        io::set_button(i, io::kPedal, pr[2], st[2], (long long)p.press_ns[2], t);
+        io::set_button(i, io::kChange, pr[3], st[3], (long long)p.press_ns[3], t);
+        io::set_button(i, io::kStart, pr[4], st[4], (long long)p.press_ns[4], t);
+        io::set_button(i, io::kCoin, pr[5], st[5], (long long)p.press_ns[5], t);
     }
-    io::set_coin(0, coin[0]);
-    io::set_coin(1, coin[1]);
     Player cab;  // test / service: keys, gamepad 1, the system mouse's buttons
     cab.pad = 1;
     cab.mouse_buttons = takes_system_mouse(0) ? g_p[0].mouse_buttons : 0;
@@ -557,6 +613,12 @@ void update() {
     for (const Input& in : g_test_bind) test = test || held(cab, in);
     for (const Input& in : g_service_bind) service = service || held(cab, in);
     io::set_test_service(test, service);
+}
+
+double take_loop_gap_ms() {
+    const double ms = double(g_loop_gap_max_ns) / 1e6;
+    g_loop_gap_max_ns = 0;
+    return ms;
 }
 
 bool crosshair(int p, float& x, float& y) {
