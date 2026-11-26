@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Virtua Cop 3 (recomp)
+Comment=Static recompilation of Sega's Virtua Cop 3 (needs your own game files)
+Exec=vc3
+Icon=vc3-recomp
+Categories=Game;
+Terminal=false

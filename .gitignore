@@ -1,0 +1,17 @@
+# Copyrighted game data — never commit
+/vcop3/
+*.chd
+*.zip
+*.7z
+*.xbe
+/work/
+
+# Build / generated output
+/build/
+/generated/
+__pycache__/
+/tests/.venv/
+/build-appimage/
+/dist/
+vc3.log
+vc3.prev.log

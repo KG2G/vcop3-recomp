@@ -1,0 +1,7 @@
+# Guest functions whose generated code calls vc3::guest_hook(c, entry) on entry
+# (runtime/src/hooks.cpp). Regenerate with --hooks-file config/vc3_hooks.txt after editing.
+0x000398c0  # camera: build view-frustum culling planes (fov, aspect, near, far)
+0x0007ed30  # player update (per player, per frame): cheats (give weapon)
+0x00077c20  # set the current stage: cheats (start at the final stage)
+0x000ae7c0  # mission select, per frame: cheats (final stage: no mission select)
+0x000a46a0  # a shot hits (called before its damage is read): VC3_TEST_ONEHIT

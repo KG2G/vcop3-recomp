@@ -1,0 +1,6 @@
+# Extra function entry points for vc3.xbe that static analysis misses.
+# One hex address per line; '#' starts a comment. Add addresses reported by
+#   [dispatch] call to unknown guest address XXXXXXXX
+# and re-run the recompiler:
+#   build/recompiler/vc3recomp work/fs/vc3.xbe generated --entries-file config/vc3_entries.txt
+0x001898cd  # DSOUND method (indirect call from 0x1870fd)
