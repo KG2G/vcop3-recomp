@@ -47,7 +47,8 @@ add_library(vc3_runtime STATIC
   src/io/mediaboard.cpp
   src/audio/apu.cpp
   src/audio/aci.cpp
-  src/hwwatch.cpp)
+  src/hwwatch.cpp
+  src/platform.cpp)
 target_include_directories(vc3_runtime PUBLIC include PRIVATE src)
 
 # Vulkan renderer (VC3_RENDERER=vulkan): needs the Vulkan headers and shaderc (GLSL -> SPIR-V).
@@ -100,7 +101,15 @@ target_include_directories(vc3 PRIVATE src)
 # Kernel exports self-register via static objects; keep them all.
 target_link_libraries(vc3 PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,vc3_runtime>)
 target_compile_options(vc3 PRIVATE -Wall -Wextra)
-target_link_options(vc3 PRIVATE -rdynamic)  # lets crash reports name the lifted function (dladdr)
+if(WIN32)
+  # A windowed program (no console; output goes to vc3.log), a 64 MiB stack for every thread
+  # (the recompiled code nests deeply; Windows' default is 1 MiB), and the MinGW runtime linked
+  # in, so the .exe needs only SDL3.dll and the system's Vulkan loader.
+  target_link_options(vc3 PRIVATE -mwindows -Wl,--stack,67108864 -static-libgcc -static-libstdc++
+                      -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic)
+else()
+  target_link_options(vc3 PRIVATE -rdynamic)  # lets crash reports name the lifted function (dladdr)
+endif()
 
 # The software rasteriser is the hot path: let the compiler vectorise it.
 # VC3_NATIVE=OFF (release builds) targets x86-64-v2 instead of this machine's CPU.

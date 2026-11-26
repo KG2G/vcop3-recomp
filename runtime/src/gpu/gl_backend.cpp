@@ -2,6 +2,7 @@
 #include "gpu/device.h"
 #include "gpu/gl_device.h"
 #include "gpu/smaa.h"
+#include "platform.h"
 #ifdef VC3_HAVE_VULKAN
 #include "gpu/vk_present.h"
 #endif
@@ -957,7 +958,7 @@ struct GpuVertex {
 }  // namespace
 
 bool init() {
-    const char* r = std::getenv("VC3_RENDERER");
+    const char* r = platform::kVulkanOnly ? "vulkan" : std::getenv("VC3_RENDERER");
     if (r && std::string(r) == "vulkan") {
         g_dev = dev::create_vulkan_device();
         if (!g_dev) std::fprintf(stderr, "[gpu] Vulkan unavailable: using OpenGL\n");

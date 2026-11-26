@@ -1,9 +1,13 @@
 #include "mmio.h"
 
 #include <Zydis/Zydis.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <dlfcn.h>
 #include <signal.h>
 #include <ucontext.h>
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -28,6 +32,36 @@ struct Range {
 std::vector<Range> g_ranges;
 ZydisDecoder g_dec;
 
+// The faulting thread's registers: Linux ucontext_t or Windows CONTEXT. GPRs by index in
+// x86 order (rax rcx rdx rbx rsp rbp rsi rdi r8..r15).
+#ifdef _WIN32
+struct HostCtx {
+    CONTEXT* c;
+    unsigned long long& gpr(int i) {
+        unsigned long long* r[16] = {&c->Rax, &c->Rcx, &c->Rdx, &c->Rbx, &c->Rsp, &c->Rbp, &c->Rsi, &c->Rdi,
+                           &c->R8,  &c->R9,  &c->R10, &c->R11, &c->R12, &c->R13, &c->R14, &c->R15};
+        return *r[i];
+    }
+    uint64_t flags() const { return c->EFlags; }
+    void set_flags(uint64_t f) { c->EFlags = DWORD(f); }
+    unsigned long long& rip() { return c->Rip; }
+    uint32_t* xmm(int i) { return reinterpret_cast<uint32_t*>(&c->Xmm0 + i); }
+};
+#else
+struct HostCtx {
+    ucontext_t* uc;
+    unsigned long long& gpr(int i) {
+        static const int map[16] = {REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI,
+                                    REG_R8,  REG_R9,  REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15};
+        return reinterpret_cast<unsigned long long&>(uc->uc_mcontext.gregs[map[i]]);
+    }
+    uint64_t flags() const { return uint64_t(uc->uc_mcontext.gregs[REG_EFL]); }
+    void set_flags(uint64_t f) { uc->uc_mcontext.gregs[REG_EFL] = greg_t(f); }
+    unsigned long long& rip() { return reinterpret_cast<unsigned long long&>(uc->uc_mcontext.gregs[REG_RIP]); }
+    uint32_t* xmm(int i) { return reinterpret_cast<uint32_t*>(&uc->uc_mcontext.fpregs->_xmm[i]); }
+};
+#endif
+
 const Range* find(uint32_t a) {
     for (const auto& r : g_ranges)
         if (a - r.base < r.size) return &r;
@@ -37,14 +71,14 @@ const Range* find(uint32_t a) {
 int greg_index(ZydisRegister r) {
     const ZydisRegister big = ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, r);
     switch (big) {
-        case ZYDIS_REGISTER_RAX: return REG_RAX; case ZYDIS_REGISTER_RCX: return REG_RCX;
-        case ZYDIS_REGISTER_RDX: return REG_RDX; case ZYDIS_REGISTER_RBX: return REG_RBX;
-        case ZYDIS_REGISTER_RSP: return REG_RSP; case ZYDIS_REGISTER_RBP: return REG_RBP;
-        case ZYDIS_REGISTER_RSI: return REG_RSI; case ZYDIS_REGISTER_RDI: return REG_RDI;
-        case ZYDIS_REGISTER_R8: return REG_R8;   case ZYDIS_REGISTER_R9: return REG_R9;
-        case ZYDIS_REGISTER_R10: return REG_R10; case ZYDIS_REGISTER_R11: return REG_R11;
-        case ZYDIS_REGISTER_R12: return REG_R12; case ZYDIS_REGISTER_R13: return REG_R13;
-        case ZYDIS_REGISTER_R14: return REG_R14; case ZYDIS_REGISTER_R15: return REG_R15;
+        case ZYDIS_REGISTER_RAX: return 0;  case ZYDIS_REGISTER_RCX: return 1;
+        case ZYDIS_REGISTER_RDX: return 2;  case ZYDIS_REGISTER_RBX: return 3;
+        case ZYDIS_REGISTER_RSP: return 4;  case ZYDIS_REGISTER_RBP: return 5;
+        case ZYDIS_REGISTER_RSI: return 6;  case ZYDIS_REGISTER_RDI: return 7;
+        case ZYDIS_REGISTER_R8: return 8;   case ZYDIS_REGISTER_R9: return 9;
+        case ZYDIS_REGISTER_R10: return 10; case ZYDIS_REGISTER_R11: return 11;
+        case ZYDIS_REGISTER_R12: return 12; case ZYDIS_REGISTER_R13: return 13;
+        case ZYDIS_REGISTER_R14: return 14; case ZYDIS_REGISTER_R15: return 15;
         default: return -1;
     }
 }
@@ -53,27 +87,27 @@ bool is_high8(ZydisRegister r) {
     return r == ZYDIS_REGISTER_AH || r == ZYDIS_REGISTER_CH || r == ZYDIS_REGISTER_DH || r == ZYDIS_REGISTER_BH;
 }
 
-uint64_t get_reg(ucontext_t* uc, ZydisRegister r) {
+uint64_t get_reg(HostCtx& uc, ZydisRegister r) {
     const int i = greg_index(r);
-    const uint64_t v = uint64_t(uc->uc_mcontext.gregs[i]);
+    const uint64_t v = uc.gpr(i);
     return is_high8(r) ? (v >> 8) & 0xFF : v;
 }
 
-void set_reg(ucontext_t* uc, ZydisRegister r, uint64_t v) {
+void set_reg(HostCtx& uc, ZydisRegister r, uint64_t v) {
     const int i = greg_index(r);
-    auto& g = uc->uc_mcontext.gregs[i];
+    unsigned long long& g = uc.gpr(i);
     const auto w = ZydisRegisterGetWidth(ZYDIS_MACHINE_MODE_LONG_64, r);
-    if (w == 64) g = greg_t(v);
-    else if (w == 32) g = greg_t(uint32_t(v));  // 32-bit writes zero-extend
-    else if (w == 16) g = greg_t((uint64_t(g) & ~0xFFFFull) | (v & 0xFFFF));
-    else if (is_high8(r)) g = greg_t((uint64_t(g) & ~0xFF00ull) | ((v & 0xFF) << 8));
-    else g = greg_t((uint64_t(g) & ~0xFFull) | (v & 0xFF));
+    if (w == 64) g = v;
+    else if (w == 32) g = uint32_t(v);  // 32-bit writes zero-extend
+    else if (w == 16) g = (g & ~0xFFFFull) | (v & 0xFFFF);
+    else if (is_high8(r)) g = (g & ~0xFF00ull) | ((v & 0xFF) << 8);
+    else g = (g & ~0xFFull) | (v & 0xFF);
 }
 
-void set_flags_from(ucontext_t* uc, uint64_t a, uint64_t b, uint64_t r, unsigned bits, bool sub, bool logic) {
+void set_flags_from(HostCtx& uc, uint64_t a, uint64_t b, uint64_t r, unsigned bits, bool sub, bool logic) {
     const uint64_t m = bits == 64 ? ~0ull : (1ull << bits) - 1, sign = 1ull << (bits - 1);
     a &= m; b &= m; r &= m;
-    uint64_t f = uint64_t(uc->uc_mcontext.gregs[REG_EFL]) & ~0x8D5ull;
+    uint64_t f = uc.flags() & ~0x8D5ull;
     if (!logic) {
         if (sub ? a < b : r < a) f |= 0x1;
         if (sub ? ((a ^ b) & (a ^ r) & sign) : (~(a ^ b) & (a ^ r) & sign)) f |= 0x800;
@@ -82,13 +116,17 @@ void set_flags_from(ucontext_t* uc, uint64_t a, uint64_t b, uint64_t r, unsigned
     if (r == 0) f |= 0x40;
     if (r & sign) f |= 0x80;
     if (!__builtin_parity(r & 0xFF)) f |= 0x4;
-    uc->uc_mcontext.gregs[REG_EFL] = greg_t(f);
+    uc.set_flags(f);
 }
 
-[[noreturn]] void fatal(const char* why, uint32_t guest, ucontext_t* uc) {
-    const auto rip = uint64_t(uc->uc_mcontext.gregs[REG_RIP]);
+[[noreturn]] void fatal(const char* why, uint32_t guest, HostCtx& uc) {
+    const uint64_t rip = uc.rip();
+#ifdef _WIN32
+    const char* fn = "?";
+#else
     Dl_info di{};
     const char* fn = (dladdr(reinterpret_cast<void*>(rip), &di) && di.dli_sname) ? di.dli_sname : "?";
+#endif
     char text[128] = "?";
     ZydisDecodedInstruction in;
     ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
@@ -101,18 +139,11 @@ void set_flags_from(ucontext_t* uc, uint64_t a, uint64_t b, uint64_t r, unsigned
     std::abort();
 }
 
-void handler(int sig, siginfo_t* si, void* vuc) {
-    auto* uc = static_cast<ucontext_t*>(vuc);
-    const auto host = reinterpret_cast<uint8_t*>(si->si_addr);
-    if (!g_mem || host < g_mem || host >= g_mem + (uint64_t(1) << 32)) {
-        signal(sig, SIG_DFL);  // not a guest access: crash normally
-        return;
-    }
-    const uint32_t guest = uint32_t(host - g_mem);
+// Emulates the host instruction at the faulting RIP against the MMIO range and moves past it.
+void emulate(HostCtx& uc, uint32_t guest) {
     const Range* r = find(guest);
     if (!r) fatal("access to unmapped guest memory", guest, uc);
-
-    const auto rip = reinterpret_cast<const uint8_t*>(uc->uc_mcontext.gregs[REG_RIP]);
+    const auto rip = reinterpret_cast<const uint8_t*>(uc.rip());
     ZydisDecodedInstruction in;
     ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
     if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&g_dec, rip, 15, &in, ops))) fatal("undecodable host instruction", guest, uc);
@@ -141,7 +172,7 @@ void handler(int sig, siginfo_t* si, void* vuc) {
                 if (regop.type == ZYDIS_OPERAND_TYPE_REGISTER && greg_index(regop.reg.value) >= 0) goto gpr_mov;
                 fatal("unsupported SSE MMIO operand", guest, uc);
             }
-            auto* x = reinterpret_cast<uint32_t*>(&uc->uc_mcontext.fpregs->_xmm[regop.reg.value - ZYDIS_REGISTER_XMM0]);
+            uint32_t* x = uc.xmm(regop.reg.value - ZYDIS_REGISTER_XMM0);
             if (mem == 1) {  // load
                 const bool keep_upper = in.mnemonic == ZYDIS_MNEMONIC_MOVSS && false;
                 (void)keep_upper;
@@ -192,8 +223,30 @@ void handler(int sig, siginfo_t* si, void* vuc) {
         default:
             fatal("unsupported host instruction for MMIO", guest, uc);
     }
-    uc->uc_mcontext.gregs[REG_RIP] += in.length;
+    uc.rip() += in.length;
 }
+
+#ifdef _WIN32
+LONG CALLBACK veh(EXCEPTION_POINTERS* ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || ep->ExceptionRecord->NumberParameters < 2)
+        return EXCEPTION_CONTINUE_SEARCH;
+    const auto host = reinterpret_cast<uint8_t*>(ep->ExceptionRecord->ExceptionInformation[1]);
+    if (!g_mem || host < g_mem || host >= g_mem + (uint64_t(1) << 32)) return EXCEPTION_CONTINUE_SEARCH;
+    HostCtx uc{ep->ContextRecord};
+    emulate(uc, uint32_t(host - g_mem));
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+#else
+void handler(int sig, siginfo_t* si, void* vuc) {
+    const auto host = reinterpret_cast<uint8_t*>(si->si_addr);
+    if (!g_mem || host < g_mem || host >= g_mem + (uint64_t(1) << 32)) {
+        signal(sig, SIG_DFL);  // not a guest access: crash normally
+        return;
+    }
+    HostCtx uc{static_cast<ucontext_t*>(vuc)};
+    emulate(uc, uint32_t(host - g_mem));
+}
+#endif
 
 }  // namespace
 
@@ -222,12 +275,16 @@ void register_range(uint32_t base, uint32_t size, const char* name, ReadFn rd, W
 
 void install() {
     ZydisDecoderInit(&g_dec, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+#ifdef _WIN32
+    AddVectoredExceptionHandler(1, veh);
+#else
     struct sigaction sa{};
     sa.sa_sigaction = handler;
     sa.sa_flags = SA_SIGINFO | SA_NODEFER;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, nullptr);
     sigaction(SIGBUS, &sa, nullptr);
+#endif
 }
 
 }  // namespace vc3::mmio

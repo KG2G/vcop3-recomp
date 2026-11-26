@@ -173,7 +173,6 @@ void run_evdev(EvDev dev, RawState* st) {
     }
     close(fd);
 }
-#endif
 
 // Wiimotes (Linux hid-wiimote): a core device (buttons) and an IR device (the sensor bar's
 // dots, ABS_HAT0X..HAT3Y, 1023 = not seen), matched by their Bluetooth address (uniq).
@@ -288,6 +287,7 @@ void run_wii(WiiDev w, RawState* st) {
         }
     }
 }
+#endif  // __linux__ (evdev mice / lightguns, Wiimotes)
 
 RawState* open_raw(const std::string& name) {
     std::lock_guard lk(g_raw_m);

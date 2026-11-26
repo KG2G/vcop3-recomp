@@ -56,11 +56,15 @@ KEXPORT(ExQueryNonVolatileSetting) {
 KEXPORT(HalRegisterShutdownNotification) { return 0; }
 KEXPORT(HalReturnToFirmware) {
     std::fprintf(stderr, "[hal] HalReturnToFirmware(%u): guest requested reboot/shutdown\n", a[0]);
-    std::exit(0);
+    // Quit without running global destructors: the renderer and audio threads are still
+    // going (std::exit tore their state down under them: a crash on the way out).
+    std::fflush(nullptr);
+    std::_Exit(0);
 }
 KEXPORT(HalInitiateShutdown) {
     std::fprintf(stderr, "[hal] HalInitiateShutdown\n");
-    std::exit(0);
+    std::fflush(nullptr);
+    std::_Exit(0);
 }
 // HalReadWritePCISpace(BusNumber, SlotNumber, RegisterNumber, Buffer, Length, WritePCISpace)
 KEXPORT(HalReadWritePCISpace) {

@@ -3,6 +3,7 @@
 // after the write); `addr2line -f -e build/runtime/vc3 0xOFFSET` names the recompiled
 // function (OFFSET: the logged address minus the executable's load base, also logged).
 // Set up before any guest thread starts: threads created later inherit the breakpoints.
+#ifndef _WIN32  // (Linux-only developer tool; Windows gets the empty version below)
 #include <linux/hw_breakpoint.h>
 #include <linux/perf_event.h>
 #include <signal.h>
@@ -78,3 +79,9 @@ void init() {
 }
 
 }  // namespace vc3::hwwatch
+
+#else
+namespace vc3::hwwatch {
+void init() {}
+}  // namespace vc3::hwwatch
+#endif

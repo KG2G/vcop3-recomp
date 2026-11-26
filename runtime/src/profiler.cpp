@@ -5,6 +5,7 @@
 // thread). Every 10 s, and when the window closes, work/profile.txt gets a
 // histogram of program-relative addresses; tools/profile.py (or addr2line -f)
 // turns them into function names.
+#ifndef _WIN32  // (Linux-only developer tool; Windows gets the empty version below)
 #include "profiler.h"
 
 #include <signal.h>
@@ -113,3 +114,12 @@ void vblank(long frame) {
 }
 
 }  // namespace vc3::profiler
+
+#else
+#include "profiler.h"
+namespace vc3::profiler {
+void init() {}
+void vblank(long) {}
+void dump() {}
+}  // namespace vc3::profiler
+#endif

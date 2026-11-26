@@ -25,6 +25,7 @@
 #include "gpu/pgraph.h"
 #include "gpu/device.h"
 #include "io/input.h"
+#include "platform.h"
 #include "io/jvs.h"
 #include "kernel/ke.h"
 #include "mmio.h"
@@ -722,6 +723,7 @@ void on_refresh(Clock::time_point now) {
 
 bool wants_vulkan_window() {
 #ifdef VC3_HAVE_VULKAN
+    if (platform::kVulkanOnly) return true;
     const char* r = std::getenv("VC3_RENDERER");
     return r && !std::strcmp(r, "vulkan");
 #else

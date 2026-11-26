@@ -1,3 +1,4 @@
+#include "platform.h"
 #include "launcher.h"
 
 #include <SDL3/SDL.h>
@@ -450,6 +451,7 @@ bool run() {
             if (ImGui::BeginCombo((std::string("##") + o.key).c_str(), cur_label)) {
                 for (const auto& c : o.choices) {
                     if (!std::strcmp(o.key, "renderer") && !std::strcmp(c.value, "vulkan") && !vulkan_built()) continue;
+                    if (!std::strcmp(o.key, "renderer") && !std::strcmp(c.value, "opengl") && platform::kVulkanOnly) continue;
                     const bool sel = cur == c.value;
                     if (ImGui::Selectable(c.label, sel)) settings::set(o.key, c.value);
                     if (sel) ImGui::SetItemDefaultFocus();

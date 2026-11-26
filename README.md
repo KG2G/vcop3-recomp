@@ -69,8 +69,13 @@ cmake --build build
 build/runtime/vc3
 ```
 
-`tools/appimage/build.sh` builds the Linux AppImage inside an Ubuntu 22.04 container (needs
-Docker and step 2 done).
+`tools/appimage/build.sh` builds the Linux AppImage inside an Ubuntu 22.04 container, and
+`tools/windows/build.sh` cross-compiles the Windows `.exe` with MinGW-w64 (both need Docker and
+step 2 done).
+
+The Windows build uses the Vulkan renderer (any current NVIDIA, AMD or Intel driver) and needs
+Windows 10 version 1803 or newer. Separate raw mice / lightguns and Wiimotes are Linux-only for
+now; the system mouse and gamepads work on both.
 
 ## Third-party code
 

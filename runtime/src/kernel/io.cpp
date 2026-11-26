@@ -9,6 +9,30 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#include <io.h>
+#include <mutex>
+// Windows: files open in binary mode (no newline translation), and the POSIX calls the
+// MSVC runtime lacks, done with seek + read/write under a lock (guest threads share fds).
+#define VC3_OBIN O_BINARY
+namespace {
+std::mutex g_pio_m;
+ssize_t pread(int fd, void* buf, size_t n, long long off) {
+    std::lock_guard lk(g_pio_m);
+    if (_lseeki64(fd, off, SEEK_SET) < 0) return -1;
+    return _read(fd, buf, unsigned(n));
+}
+ssize_t pwrite(int fd, const void* buf, size_t n, long long off) {
+    std::lock_guard lk(g_pio_m);
+    if (_lseeki64(fd, off, SEEK_SET) < 0) return -1;
+    return _write(fd, buf, unsigned(n));
+}
+int ftruncate(int fd, long long size) { return _chsize_s(fd, size) == 0 ? 0 : -1; }
+}  // namespace
+#else
+#define VC3_OBIN 0
+#endif
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -72,8 +96,8 @@ void init_namespace() {
         }
         if (!fs::exists(d.raw) || fs::file_size(d.raw) != d.size) {
             // Sparse image of the full partition size: unwritten sectors read as zeros.
-            const int fd = ::open(d.raw.c_str(), O_CREAT | O_RDWR, 0644);
-            if (fd >= 0) { if (::ftruncate(fd, off_t(d.size))) {} ::close(fd); }
+            const int fd = ::open(d.raw.string().c_str(), O_CREAT | O_RDWR | VC3_OBIN, 0644);
+            if (fd >= 0) { if (ftruncate(fd, int64_t(d.size))) {} ::close(fd); }
         }
         g_devices["\\device\\harddisk0\\partition" + std::to_string(p)] = d;
     }
@@ -181,7 +205,11 @@ void write_iosb(u32 iosb, u32 status, u32 info) {
 }
 
 s64 to_filetime(const struct stat& st) {
+#ifdef _WIN32
+    return s64(st.st_mtime) * 10000000 + 116444736000000000LL;
+#else
     return s64(st.st_mtim.tv_sec) * 10000000 + st.st_mtim.tv_nsec / 100 + 116444736000000000LL;
+#endif
 }
 u32 attributes(const struct stat& st) { return S_ISDIR(st.st_mode) ? 0x10 : 0x80; }  // DIRECTORY / NORMAL
 
@@ -206,12 +234,12 @@ u32 open_common(u32 phandle, u32 oa, u32 iosb, u32 disposition, u32 options, boo
             f->raw_device = d;
             f->host = d->raw.empty() ? fs::path(path) : d->raw;
             if (!d->rd) {
-                f->fd = ::open(d->raw.c_str(), O_RDWR);
+                f->fd = ::open(d->raw.string().c_str(), O_RDWR | VC3_OBIN);
                 if (f->fd < 0) { write_iosb(iosb, STATUS_ACCESS_DENIED, 0); return STATUS_ACCESS_DENIED; }
             }
             wr<u32>(phandle, create_handle(alloc_object(0x40, data_export_addr("IoFileObjectType")), f));
             write_iosb(iosb, STATUS_SUCCESS, 1);
-            if (trace_enabled()) std::fprintf(stderr, "[io] open %s -> raw volume %s\n", path.c_str(), d->raw.c_str());
+            if (trace_enabled()) std::fprintf(stderr, "[io] open %s -> raw volume %s\n", path.c_str(), d->raw.string().c_str());
             return STATUS_SUCCESS;
         }
     }
@@ -222,14 +250,14 @@ u32 open_common(u32 phandle, u32 oa, u32 iosb, u32 disposition, u32 options, boo
         return STATUS_OBJECT_PATH_NOT_FOUND;
     }
     struct stat st{};
-    const bool exists = ::stat(host.c_str(), &st) == 0;
+    const bool exists = ::stat(host.string().c_str(), &st) == 0;
     const bool want_dir = options & 0x1;       // FILE_DIRECTORY_FILE
     const bool want_file = options & 0x40;     // FILE_NON_DIRECTORY_FILE
     u32 info = 1;                              // FILE_OPENED
 
     if (!exists) {
         if (disposition == 1 /*OPEN*/ || disposition == 4 /*OVERWRITE*/) {
-            if (trace_enabled()) std::fprintf(stderr, "[io] open %s -> %s: not found\n", path.c_str(), host.c_str());
+            if (trace_enabled()) std::fprintf(stderr, "[io] open %s -> %s: not found\n", path.c_str(), host.string().c_str());
             write_iosb(iosb, STATUS_OBJECT_NAME_NOT_FOUND, 5);
             return STATUS_OBJECT_NAME_NOT_FOUND;
         }
@@ -238,8 +266,8 @@ u32 open_common(u32 phandle, u32 oa, u32 iosb, u32 disposition, u32 options, boo
             return STATUS_OBJECT_PATH_NOT_FOUND;
         }
         if (want_dir) fs::create_directory(host);
-        else { const int fd = ::open(host.c_str(), O_CREAT | O_RDWR, 0644); if (fd >= 0) ::close(fd); }
-        ::stat(host.c_str(), &st);
+        else { const int fd = ::open(host.string().c_str(), O_CREAT | O_RDWR | VC3_OBIN, 0644); if (fd >= 0) ::close(fd); }
+        ::stat(host.string().c_str(), &st);
         info = 2;  // FILE_CREATED
     } else if (disposition == 2 /*CREATE*/) {
         write_iosb(iosb, STATUS_OBJECT_NAME_COLLISION, 4);
@@ -256,14 +284,14 @@ u32 open_common(u32 phandle, u32 oa, u32 iosb, u32 disposition, u32 options, boo
     if (!is_dir) {
         int flags = write_access ? O_RDWR : O_RDONLY;
         if (exists && (disposition == 0 || disposition == 4 || disposition == 5)) { flags |= O_TRUNC; info = 3; }
-        f->fd = ::open(host.c_str(), flags);
-        if (f->fd < 0 && write_access) f->fd = ::open(host.c_str(), O_RDONLY);  // read-only game media
+        f->fd = ::open(host.string().c_str(), flags | VC3_OBIN);
+        if (f->fd < 0 && write_access) f->fd = ::open(host.string().c_str(), O_RDONLY | VC3_OBIN);  // read-only game media
         if (f->fd < 0) { write_iosb(iosb, STATUS_ACCESS_DENIED, 0); return STATUS_ACCESS_DENIED; }
     }
     const u32 body = alloc_object(0x40, data_export_addr("IoFileObjectType"));
     wr<u32>(phandle, create_handle(body, f));
     write_iosb(iosb, STATUS_SUCCESS, info);
-    if (trace_enabled()) std::fprintf(stderr, "[io] open %s -> %s\n", path.c_str(), host.c_str());
+    if (trace_enabled()) std::fprintf(stderr, "[io] open %s -> %s\n", path.c_str(), host.string().c_str());
     return STATUS_SUCCESS;
 }
 
@@ -296,7 +324,7 @@ KEXPORT(NtReadFile) {
     }
     const auto t0 = std::chrono::steady_clock::now();
     const ssize_t n = (f->raw_device && f->raw_device->rd) ? f->raw_device->rd(off, host_ptr(a[5]), a[6])
-                                                           : ::pread(f->fd, host_ptr(a[5]), a[6], off_t(off));
+                                                           : pread(f->fd, host_ptr(a[5]), a[6], int64_t(off));
     sched::g_io_ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
     const u32 status = n < 0 ? STATUS_UNSUCCESSFUL : (n == 0 && a[6] ? STATUS_END_OF_FILE : STATUS_SUCCESS);
     if (n > 0) f->pos = off + u64(n);
@@ -314,7 +342,7 @@ KEXPORT(NtWriteFile) {
         if (o >= 0) off = u64(o);
     }
     const ssize_t n = (f->raw_device && f->raw_device->wr) ? f->raw_device->wr(off, host_ptr(a[5]), a[6])
-                                                            : ::pwrite(f->fd, host_ptr(a[5]), a[6], off_t(off));
+                                                            : pwrite(f->fd, host_ptr(a[5]), a[6], int64_t(off));
     const u32 status = n < 0 ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
     if (n > 0) f->pos = off + u64(n);
     write_iosb(a[4], status, n > 0 ? u32(n) : 0);
@@ -327,7 +355,7 @@ KEXPORT(NtQueryInformationFile) {
     auto f = get_file(a[0]);
     if (!f) return STATUS_INVALID_HANDLE;
     struct stat st{};
-    if (f->fd >= 0) ::fstat(f->fd, &st); else ::stat(f->host.c_str(), &st);
+    if (f->fd >= 0) ::fstat(f->fd, &st); else ::stat(f->host.string().c_str(), &st);
     const u32 out = a[2];
     u32 len = 0;
     switch (a[4]) {
@@ -360,7 +388,7 @@ KEXPORT(NtSetInformationFile) {
     if (!f) return STATUS_INVALID_HANDLE;
     switch (a[4]) {
         case 14: f->pos = rd<u64>(a[2]); break;                                     // FilePositionInformation
-        case 20: if (f->fd >= 0 && ::ftruncate(f->fd, off_t(rd<u64>(a[2])))) {} break;  // FileEndOfFileInformation
+        case 20: if (f->fd >= 0 && ftruncate(f->fd, int64_t(rd<u64>(a[2])))) {} break;  // FileEndOfFileInformation
         case 19: break;                                                              // FileAllocationInformation
         case 4: break;                                                               // FileBasicInformation
         case 13:                                                                     // FileDispositionInformation
@@ -379,7 +407,7 @@ KEXPORT(NtQueryFullAttributesFile) {
     std::lock_guard lk(g_io_m);
     fs::path host;
     struct stat st{};
-    if (!resolve_object_path(object_path(a[0]), host) || ::stat(host.c_str(), &st) != 0)
+    if (!resolve_object_path(object_path(a[0]), host) || ::stat(host.string().c_str(), &st) != 0)
         return STATUS_OBJECT_NAME_NOT_FOUND;
     write_network_open_info(a[1], st);
     return STATUS_SUCCESS;
@@ -432,7 +460,7 @@ KEXPORT(NtQueryDirectoryFile) {
     // FILE_DIRECTORY_INFORMATION (one entry per call, ANSI name)
     const std::string n = f->dir_entries[f->dir_index++];
     struct stat st{};
-    ::stat((f->host / n).c_str(), &st);
+    ::stat((f->host / n).string().c_str(), &st);
     const u32 out = a[5];
     if (a[6] < 0x40 + n.size()) return STATUS_BUFFER_TOO_SMALL;
     wr<u32>(out + 0x00, 0);  // NextEntryOffset
@@ -449,7 +477,11 @@ KEXPORT(NtQueryDirectoryFile) {
 
 KEXPORT(NtFlushBuffersFile) {
     auto f = get_file(a[0]);
+#ifdef _WIN32
+    if (f && f->fd >= 0) _commit(f->fd);
+#else
     if (f && f->fd >= 0) ::fsync(f->fd);
+#endif
     write_iosb(a[1], STATUS_SUCCESS, 0);
     return STATUS_SUCCESS;
 }
@@ -483,7 +515,7 @@ KEXPORT(NtDeviceIoControlFile) {
             info = 32;
             break;
         default:
-            std::fprintf(stderr, "[io] NtDeviceIoControlFile(%s, code=%#x) not supported\n", f->host.c_str(), code);
+            std::fprintf(stderr, "[io] NtDeviceIoControlFile(%s, code=%#x) not supported\n", f->host.string().c_str(), code);
             write_iosb(a[4], STATUS_INVALID_PARAMETER, 0);
             return STATUS_INVALID_PARAMETER;
     }
@@ -503,7 +535,7 @@ KEXPORT(NtFsControlFile) {
             write_iosb(a[4], STATUS_SUCCESS, 0);
             return STATUS_SUCCESS;
         default:
-            std::fprintf(stderr, "[io] NtFsControlFile(%s, code=%#x) not supported\n", f->host.c_str(), a[5]);
+            std::fprintf(stderr, "[io] NtFsControlFile(%s, code=%#x) not supported\n", f->host.string().c_str(), a[5]);
             return STATUS_INVALID_PARAMETER;
     }
 }

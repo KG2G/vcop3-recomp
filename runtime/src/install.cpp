@@ -1,3 +1,4 @@
+#include "platform.h"
 #include "install.h"
 #include "settings.h"
 
@@ -431,7 +432,7 @@ std::string data_root() { return fs::current_path().string(); }  // main() picks
 fs::path exe_dir() {
     if (const char* ai = std::getenv("APPIMAGE")) return fs::path(ai).parent_path();  // beside the .AppImage
     std::error_code ec;
-    const fs::path p = fs::read_symlink("/proc/self/exe", ec);
+    const fs::path p = platform::exe_path();
     return ec ? fs::current_path() : p.parent_path();
 }
 

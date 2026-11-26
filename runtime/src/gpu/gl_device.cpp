@@ -860,7 +860,7 @@ void for_each(const std::function<void(const std::string&, const std::string&)>&
     g_enabled = true;
     for (const auto& e : std::filesystem::directory_iterator(kSourceDir, ec)) {
         if (e.path().extension() != ".glsl") continue;
-        std::FILE* f = std::fopen(e.path().c_str(), "rb");
+        std::FILE* f = std::fopen(e.path().string().c_str(), "rb");
         if (!f) continue;
         std::string all;
         char buf[65536];

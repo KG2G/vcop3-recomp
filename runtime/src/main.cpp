@@ -6,8 +6,11 @@
 // --no-launcher is given; --launcher shows it regardless. --no-settings ignores the
 // settings file (environment variables and built-in defaults only: tests use it).
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>  // (Windows: the WinMain entry point)
 #include <fcntl.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -36,6 +39,7 @@
 #include "loader.h"
 #include "settings.h"
 #include "mmio.h"
+#include "platform.h"
 #include "vc3/memory.h"
 #include "vc3/recomp.h"
 #include "xbe.h"
@@ -45,6 +49,17 @@ using namespace vc3;
 // Everything the program prints (stdout and stderr) also goes to vc3.log in the data
 // folder (the previous run's log is kept as vc3.prev.log), so a crash can be reported
 // without a terminal.
+#ifdef _WIN32
+// Windows: the game is a GUI program without a console; everything goes to the file.
+static void start_log() {
+    std::error_code ec;
+    std::filesystem::rename("vc3.log", "vc3.prev.log", ec);
+    if (std::FILE* t = std::fopen("vc3.log", "w")) std::fclose(t);  // a fresh log
+    // Both streams append (each write goes to the end), so their lines don't overwrite each other.
+    if (std::freopen("vc3.log", "a", stderr)) std::setvbuf(stderr, nullptr, _IONBF, 0);
+    if (FILE* o = std::freopen("vc3.log", "a", stdout)) std::setvbuf(o, nullptr, _IONBF, 0);
+}
+#else
 struct LogSink { int term, file; };
 static ssize_t log_write(void* c, const char* buf, size_t n) {
     const auto* s = static_cast<const LogSink*>(c);
@@ -69,6 +84,7 @@ static void start_log() {
         stdout = o;
     }
 }
+#endif
 
 namespace vc3::hwwatch { void init(); }
 
@@ -128,7 +144,7 @@ int main(int argc, char** argv) {
     } else if (!std::filesystem::exists("work/fs")) {
         std::error_code ec;
         bool found = false;
-        auto dir = std::filesystem::read_symlink("/proc/self/exe", ec).parent_path();
+        auto dir = platform::exe_path().parent_path();
         for (; !ec && !dir.empty() && dir != dir.root_path(); dir = dir.parent_path())
             // (a source checkout counts before the game is installed: --install fills its work/)
             if (std::filesystem::exists(dir / "work" / "fs") || std::filesystem::exists(dir / "config" / "vc3_entries.txt")) {
@@ -164,7 +180,7 @@ int main(int argc, char** argv) {
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
     profiler::init();
     // The GL renderer shares an EGL context with the window: before SDL's video starts.
-    SDL_SetHint(SDL_HINT_VIDEO_FORCE_EGL, "1");
+    if (!platform::kVulkanOnly) SDL_SetHint(SDL_HINT_VIDEO_FORCE_EGL, "1");
     // Settings, and the launcher to change them (before anything reads the options).
     if (!no_settings) {
         const bool show = !headless && !no_launcher &&
@@ -178,6 +194,8 @@ int main(int argc, char** argv) {
                 SDL_Quit();
                 return 0;
             }
+            // The launcher may have installed into, or picked, another folder: play from there.
+            if (!settings::get("install_dir").empty()) install::use_location(settings::get("install_dir"));
         }
         settings::apply();
     }
@@ -222,7 +240,7 @@ int main(int argc, char** argv) {
             // (the renderer reads VC3_RENDERER too).
             std::fprintf(stderr, "[main] Vulkan unavailable (%s), using OpenGL\n", SDL_GetError());
             if (win) SDL_DestroyWindow(win);
-            setenv("VC3_RENDERER", "opengl", 1);
+            platform::set_env("VC3_RENDERER", "opengl");
             win = SDL_CreateWindow("Virtua Cop 3 (recomp)", ww, wh, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL);
             if (win && !gpu::init(win)) win = nullptr;
         } else if (win && !vulkan && !gpu::init(win)) {

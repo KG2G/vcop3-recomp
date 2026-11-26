@@ -1,3 +1,4 @@
+#include "platform.h"
 #include "settings.h"
 
 #include <SDL3/SDL.h>
@@ -176,7 +177,7 @@ bool overridden(const char* key) {
 
 void apply() {
     for (const auto& o : kOptions)
-        if (o.env && !overridden(o.key)) setenv(o.env, get(o.key).c_str(), 1);
+        if (o.env && !overridden(o.key)) platform::set_env(o.env, get(o.key).c_str());
 }
 
 }  // namespace vc3::settings
