@@ -24,8 +24,9 @@ const std::vector<Option> kOptions = {
       {"6", "6x (3840x2880)"}, {"8", "8x (5120x3840)"}},
      "auto"},
     {"widescreen", "VC3_WIDESCREEN", "Graphics", "Aspect ratio",
-     "Widescreen shows more of the 3D scene at the sides; aiming stays exact.",
-     {{"0", "4:3 (original)"}, {"16:9", "16:9"}, {"16:10", "16:10"}, {"21:9", "21:9"}}, "0"},
+     "Widescreen shows more of the 3D scene at the sides; aiming stays exact. Match display "
+     "uses your screen's shape (16:9, 16:10 on the Steam Deck, ultrawide; 4:3 on 4:3 screens).",
+     {{"auto", "Match display"}, {"0", "4:3 (original)"}, {"16:9", "16:9"}, {"16:10", "16:10"}, {"21:9", "21:9"}}, "auto"},
     {"wide_hud", "VC3_WIDE_HUD", "Graphics", "HUD in widescreen",
      "Move the score, ammo and lives panels out to the screen edges in widescreen.",
      {{"1", "At the edges"}, {"0", "In the 4:3 area"}}, "1"},
@@ -40,10 +41,11 @@ const std::vector<Option> kOptions = {
     // built in the background, for smooth play from the start. (VC3_SHADER_PRECOMPILE=0 and
     // VC3_ASYNC_SHADERS=0 turn those off for testing.)
     {"window_size", "VC3_WINDOW_SIZE", "Display", "Window size",
-     "Size of the game window when not fullscreen (it can also be resized by dragging).",
-     {{"640x480", "640x480"}, {"960x720", "960x720"}, {"1280x960", "1280x960"}, {"1280x720", "1280x720"},
+     "Size of the game window when not fullscreen (it can also be resized by dragging). Match "
+     "display sizes it to the aspect ratio, filling most of the screen.",
+     {{"auto", "Match display"}, {"640x480", "640x480"}, {"960x720", "960x720"}, {"1280x960", "1280x960"}, {"1280x720", "1280x720"},
       {"1600x900", "1600x900"}, {"1920x1080", "1920x1080"}, {"2560x1440", "2560x1440"}, {"3840x2160", "3840x2160"}},
-     "1280x960"},
+     "auto"},
     {"fullscreen", "VC3_FULLSCREEN", "Display", "Window",
      "F11 or Alt+Enter switches while playing.", {{"0", "Windowed"}, {"1", "Fullscreen"}}, "0"},
     {"crosshair", "VC3_CROSSHAIR", "Display", "Crosshair",
@@ -64,6 +66,10 @@ const std::vector<Option> kOptions = {
      "Wait for the display refresh (no tearing). Leave on unless you know you need it off.",
      {{"1", "On"}, {"0", "Off"}}, "1"},
     {"audio", "VC3_AUDIO", "Audio", "Sound", "", {{"1", "On"}, {"0", "Off"}}, "1"},
+    {"volume", "VC3_VOLUME", "Audio", "Volume", "Loudness of the game's sound and music.",
+     {{"1", "100%"}, {"0.9", "90%"}, {"0.8", "80%"}, {"0.7", "70%"}, {"0.6", "60%"}, {"0.5", "50%"},
+      {"0.4", "40%"}, {"0.3", "30%"}, {"0.2", "20%"}, {"0.1", "10%"}},
+     "1"},
     {"freeplay", "VC3_FREEPLAY", "Game", "Free play",
      "Start and continue without coins (the game shows FREEPLAY instead of the credits).",
      {{"0", "Off (coins)"}, {"1", "On"}}, "0"},

@@ -9,7 +9,8 @@
 // the NV2A changes per draw is dynamic state except blending, colour masks, vertex
 // layouts and topology, which select a cached pipeline (saved across runs).
 #include "gpu/vk_device.h"
-#include "gpu/gl_device.h"  // shader_store
+#include "gpu/gl_device.h"
+#include "gpu/pipe_recipe.h"  // shader_store
 
 #include <SDL3/SDL_vulkan.h>
 #include <shaderc/shaderc.h>
@@ -757,7 +758,10 @@ public:
         // Everything streamed: now record.
         begin_rendering();
         VkCommandBuffer c = cb();
-        const VkPipeline pipe = progs_[dc.prog.id - 1]->state == 1 ? pipeline(key_dc, nb) : VK_NULL_HANDLE;
+        Prog* const prog = progs_[dc.prog.id - 1].get();
+        const VkPipeline pipe = shader_wait_.wait([&] { return prog->state != 0; }) && prog->state == 1
+                                    ? pipeline(key_dc, nb)
+                                    : VK_NULL_HANDLE;
         if (!pipe) return false;  // still being built in the background
         if (pipe != bound_pipe_) {
             vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
@@ -858,6 +862,7 @@ public:
     void flush() override {
         submit();
         save_pipeline_cache(false);
+        shader_wait_.new_frame();
     }
 
 private:
@@ -1238,7 +1243,7 @@ private:
         return m;
     }
     // Programs: shader modules built on a worker (async) or right away; draws using one
-    // that isn't ready are skipped.
+    // that isn't ready wait for it (ShaderWait).
     Program build(const std::string& vs, const std::string& fs, bool async) {
         const u64 key = fnv(fs.data(), fs.size(), fnv(vs.data(), vs.size()));
         auto it = programs_by_key_.find(key);
@@ -1295,7 +1300,7 @@ private:
         for (const auto& r : recipes_) {
             auto it = programs_by_key_.find(r.prog_key);
             if (it == programs_by_key_.end() || progs_[it->second - 1]->state != 1) continue;
-            PipeKey k = r.key;
+            PipeKey k = for_this_device(r.key);
             k.prog = it->second;
             pipes.push_back(get_pipe(k, true));
         }
@@ -1310,19 +1315,13 @@ private:
                          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
 
-    struct PipeKey {
-        u32 prog;
-        u8 topology, blend, src, dst, eq, mask, depth, nattr, nbind, pad[3];
-        u8 attr[16][3];   // location, binding, format
-        u32 offset[16];
-    };
     struct Pipe {
         PipeKey key{};
         Prog* prog = nullptr;
         std::atomic<int> state{0};  // 0 building, 1 ready, 2 failed
         VkPipeline pipe = VK_NULL_HANDLE;
     };
-    // The pipeline for a draw (VK_NULL_HANDLE: not built yet, skip the draw).
+    // The pipeline for a draw, waited for if still building (VK_NULL_HANDLE: failed, skip it).
     VkPipeline pipeline(const DrawCall& dc, u32 nbind) {
         PipeKey k{};
         k.prog = dc.prog.id;
@@ -1344,6 +1343,7 @@ private:
             k.offset[i] = dc.attr[i].constant ? 0 : dc.attr[i].offset;
         }
         Pipe* p = get_pipe(k, async_);
+        shader_wait_.wait([&] { return p->state != 0; });
         return p->state == 1 ? p->pipe : VK_NULL_HANDLE;
     }
     Pipe* get_pipe(const PipeKey& k, bool async) {
@@ -1448,8 +1448,24 @@ private:
         return pipe;
     }
 
+    // A recipe as this GPU's draws would key it: vertex formats it can't fetch become
+    // float4 in bindings of their own after the others, as draw() converts them (AMD /
+    // Steam Deck). Recipes recorded on a GPU that fetches everything (the shader seed comes
+    // from one) would otherwise never match there. Converted keys stay as they are.
+    PipeKey for_this_device(PipeKey k) const {
+        u8 nb = k.nbind;
+        for (int i = 0; i < k.nattr && i < 16; ++i) {
+            const u8 f = k.attr[i][2];
+            if (f > kU32x1 || attr_ok_[f]) continue;
+            k.attr[i][2] = u8(kF32x4);
+            k.attr[i][1] = nb++;
+            k.offset[i] = 0;
+        }
+        k.nbind = nb;
+        return k;
+    }
+
     // Pipeline recipes (state + program), so later runs can build them all up front.
-    struct Recipe { u64 prog_key; PipeKey key; };
     void load_recipes() {
         recipes_path_ = "work/shadercache/v4/vk-recipes.bin";
         std::FILE* f = std::fopen(recipes_path_.c_str(), "rb");
@@ -1624,6 +1640,7 @@ private:
     u32 cur_color_ = 0, cur_depth_ = 0;
     int target_w_ = 0, target_h_ = 0;
     Tex dummy2d_, dummycube_;
+    ShaderWait shader_wait_;
     bool attr_ok_[kU32x1 + 1] = {};  // vertex format fetched by the driver (else converted)
 
     static size_t attr_bytes(u8 f) {

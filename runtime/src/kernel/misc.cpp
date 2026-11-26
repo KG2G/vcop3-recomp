@@ -6,6 +6,7 @@
 #include <mutex>
 #include <vector>
 
+#include "../log.h"
 #include "gpu/nv2a.h"
 #include "kernel.h"
 #include "mm.h"
@@ -58,12 +59,12 @@ KEXPORT(HalReturnToFirmware) {
     std::fprintf(stderr, "[hal] HalReturnToFirmware(%u): guest requested reboot/shutdown\n", a[0]);
     // Quit without running global destructors: the renderer and audio threads are still
     // going (std::exit tore their state down under them: a crash on the way out).
-    std::fflush(nullptr);
+    log::end("the game asked to restart; closed");
     std::_Exit(0);
 }
 KEXPORT(HalInitiateShutdown) {
     std::fprintf(stderr, "[hal] HalInitiateShutdown\n");
-    std::fflush(nullptr);
+    log::end("the game shut down");
     std::_Exit(0);
 }
 // HalReadWritePCISpace(BusNumber, SlotNumber, RegisterNumber, Buffer, Length, WritePCISpace)

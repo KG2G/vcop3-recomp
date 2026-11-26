@@ -19,9 +19,9 @@ recompiled from.
 
 1. Download the AppImage (Linux) or the Windows build from the Releases page.
 2. Start it. The launcher opens on **Game files**: pick your `vcop3.zip` and `gdx-0003b.chd`
-   with Browse (or put them in a `roms` folder next to the program), choose where to install,
-   and press Install.
-3. Press **PLAY**.
+   with Browse (or put them in a `roms` folder next to the program) and choose where to install.
+3. Press **INSTALL AND PLAY**: the game is installed, then starts. Afterwards the button is
+   just **PLAY**.
 
 Settings and the installed game live in the per-user data folder (Linux:
 `~/.local/share/vcop3-recomp/vcop3-recomp/`) unless you choose another install folder.

@@ -29,17 +29,18 @@ VC3_RENDERER=vulkan VC3_RES_SCALE=3 VC3_WIDESCREEN=16:9 ./vc3
 |---|---|---|
 | `VC3_RENDERER` | Renderer | `opengl`, `vulkan` |
 | `VC3_RES_SCALE` | 3D resolution | `auto` (match display), `1`, `2`, `3`, `4`, `6`, `8` (times 640x480) |
-| `VC3_WIDESCREEN` | Aspect ratio | `0` (4:3), `16:9`, `16:10`, `21:9` |
+| `VC3_WIDESCREEN` | Aspect ratio | `auto` (match display), `0` (4:3), `16:9`, `16:10`, `21:9` |
 | `VC3_WIDE_HUD` | HUD in widescreen | `1` at the screen edges, `0` in place |
 | `VC3_ANISOTROPIC` | Anisotropic filtering | `1` (off), `2`, `4`, `8`, `16` |
 | `VC3_SMAA` | Anti-aliasing (SMAA) | `off`, `low`, `medium`, `high`, `ultra` |
-| `VC3_WINDOW_SIZE` | Window size | e.g. `1280x960`, `1920x1080` |
+| `VC3_WINDOW_SIZE` | Window size | `auto` (the aspect ratio, most of the screen), or e.g. `1280x960`, `1920x1080` |
 | `VC3_FULLSCREEN` | Window | `0` windowed, `1` fullscreen |
 | `VC3_CROSSHAIR` | Crosshair | `on`, `off` |
 | `VC3_CROSSHAIR_SIZE` | Crosshair size | `0.5` - `3` (1 = 5% of the screen height) |
 | `VC3_SINDEN_BORDER` | Sinden lightgun border | `0` off, or its thickness in percent of the screen height (`1` - `7`) |
 | `VC3_VSYNC` | Vertical sync | `1`, `0` |
 | `VC3_AUDIO` | Sound | `1`, `0` |
+| `VC3_VOLUME` | Volume | `1` (100%) down to `0.1` (10%) in the launcher; any factor works (e.g. `0.25`) |
 | `VC3_FREEPLAY` | Free play | `1`, `0` |
 | `VC3_CHEAT_AMMO` | Infinite ammo | `1`, `0` |
 | `VC3_CHEAT_LIVES` | Infinite lives | `1`, `0` |
@@ -53,7 +54,6 @@ Controls are set in the launcher's Controls tab (stored in `settings.ini`).
 
 | Variable | Effect |
 |---|---|
-| `VC3_VOLUME` | Sound volume factor (`1` normal, e.g. `0.5` half). |
 | `VC3_VK_DEVICE` | Vulkan: index of the graphics card to use (`0`, `1`, ...), when there are several. |
 | `VC3_VK_VALIDATION` | Vulkan: `1` enables the validation layer (needs it installed; for reporting renderer bugs). |
 | `VC3_TRACE_HITCH` | `1` writes every slow frame, with its cause, to `vc3.log` (for reporting stutter). |
@@ -61,5 +61,10 @@ Controls are set in the launcher's Controls tab (stored in `settings.ini`).
 ## Files
 
 - `settings.ini`: in the per-user data folder (Linux: `~/.local/share/vcop3-recomp/vcop3-recomp/`).
-- `vc3.log` (and `vc3.prev.log` from the run before): the log, in the data folder.
+- `vc3.log` (and `vc3.prev.log` from the run before): the log, in the data folder (the launcher's
+  **Open log folder** button opens it). Attach it to bug reports: it lists the version, OS, CPU,
+  graphics card and driver, display mode, settings, what the game was doing, slow frames and
+  crashes. It holds no personal information: no user or computer names, no folder paths (the
+  home folder shows as `~`, picked files by name only) and no clock times (lines give seconds
+  since start).
 - The installed game: `work/` in the data folder, or in the folder chosen in the launcher.

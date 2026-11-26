@@ -48,8 +48,11 @@ add_library(vc3_runtime STATIC
   src/audio/apu.cpp
   src/audio/aci.cpp
   src/hwwatch.cpp
-  src/platform.cpp)
+  src/platform.cpp
+  src/privacy.cpp
+  src/log.cpp)
 target_include_directories(vc3_runtime PUBLIC include PRIVATE src)
+target_compile_definitions(vc3_runtime PRIVATE VC3_VERSION="${PROJECT_VERSION}")
 
 # Vulkan renderer (VC3_RENDERER=vulkan): needs the Vulkan headers and shaderc (GLSL -> SPIR-V).
 find_package(Vulkan QUIET)

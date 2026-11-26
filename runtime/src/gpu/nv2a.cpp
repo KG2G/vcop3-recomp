@@ -1,3 +1,4 @@
+#include "log.h"
 #ifdef VC3_HAVE_VULKAN
 #include "gpu/vk_present.h"
 #endif
@@ -143,9 +144,39 @@ u32 ramht_lookup(u32 handle) {
 // picture changed: a new display buffer, or a new frame written into it). Logs every frame longer than
 // 20 ms with what happened meanwhile, and a summary every 5 s.
 extern std::atomic<u64> g_gpu_busy_total_ns;
+// Without it, the log still gets a performance line every minute and frames over 100 ms
+// (the first 50), for bug reports.
+void note_frame_light() {
+    static auto last = Clock::now(), report = Clock::now();
+    static u64 n = 0, over20 = 0, over33 = 0, logged = 0;
+    static double worst = 0, sum = 0;
+    const auto now = Clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(now - last).count();
+    last = now;
+    if (ms > 100.0 && logged < 50 && log::uptime() > 15.0) {  // (not while starting up)
+        ++logged;
+        std::fprintf(stderr, "[perf] %.0f s: one frame took %.0f ms\n", log::uptime(), ms);
+    }
+    ++n;
+    sum += ms;
+    worst = std::max(worst, ms);
+    over20 += ms > 20.0;
+    over33 += ms > 33.0;
+    if (now - report > std::chrono::seconds(60)) {
+        std::fprintf(stderr, "[perf] %.0f s: last minute %llu frames, avg %.1f ms, worst %.0f ms, over 20 ms: %llu, over 33 ms: %llu\n",
+                     log::uptime(), (unsigned long long)n, sum / double(n), worst, (unsigned long long)over20,
+                     (unsigned long long)over33);
+        report = now;
+        n = over20 = over33 = 0;
+        worst = sum = 0;
+    }
+}
 void note_frame() {
     static const bool on = std::getenv("VC3_TRACE_HITCH") != nullptr;
-    if (!on) return;
+    if (!on) {
+        note_frame_light();
+        return;
+    }
     static auto last = Clock::now(), report = Clock::now();
     static u64 last_busy = 0, last_sn = 0, last_sns = 0, n = 0, over20 = 0, over33 = 0;
     static double worst = 0, sum = 0;

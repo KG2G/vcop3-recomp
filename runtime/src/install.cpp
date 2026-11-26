@@ -1,5 +1,6 @@
 #include "platform.h"
 #include "install.h"
+#include "privacy.h"
 #include "settings.h"
 
 #include <SDL3/SDL.h>
@@ -39,7 +40,7 @@ void set_status(const std::string& m, float frac = -1) {
     std::lock_guard lk(g_progress.m);
     g_progress.message = m;
     if (frac >= 0) g_progress.fraction = frac;
-    std::fprintf(stderr, "[install] %s\n", m.c_str());
+    std::fprintf(stderr, "[install] %s\n", privacy::scrub(m).c_str());
 }
 
 // ---------------------------------------------------------------- SHA-1
@@ -202,11 +203,11 @@ bool read_pic(const std::string& path, std::vector<u8>& out, std::string& err) {
     if (low.size() >= 5 && low.substr(low.size() - 5) == ".data") {
         std::ifstream f(path, std::ios::binary);
         out.assign(std::istreambuf_iterator<char>(f), {});
-        return !out.empty() || (err = "can't read " + path, false);
+        return !out.empty() || (err = "can't read " + fs::path(path).filename().string(), false);
     }
     mz_zip_archive z{};
     if (!mz_zip_reader_init_file(&z, path.c_str(), 0)) {
-        err = path + " is not a zip file (7z isn't supported: repack it as zip)";
+        err = fs::path(path).filename().string() + " is not a zip file (7z isn't supported: repack it as zip)";
         return false;
     }
     bool ok = false;
@@ -225,7 +226,7 @@ bool read_pic(const std::string& path, std::vector<u8>& out, std::string& err) {
         break;
     }
     mz_zip_reader_end(&z);
-    if (!ok) err = path + " doesn't contain " + kPicName + " (the vcop3 set from MAME)";
+    if (!ok) err = fs::path(path).filename().string() + " doesn't contain " + kPicName + " (the vcop3 set from MAME)";
     return ok;
 }
 
@@ -264,14 +265,14 @@ struct Disc {
 
 bool open_disc(const std::string& path, Disc& d, std::string& err) {
     if (chd_open(path.c_str(), CHD_OPEN_READ, nullptr, &d.chd) != CHDERR_NONE) {
-        err = "can't open " + path + " as a CHD";
+        err = "can't open " + fs::path(path).filename().string() + " as a CHD";
         return false;
     }
     const chd_header* h = chd_get_header(d.chd);
     char sha[41];
     for (int i = 0; i < 20; ++i) std::snprintf(sha + 2 * i, 3, "%02x", h->sha1[i]);
     if (std::string(sha) != kChdSha1) {
-        err = path + ": SHA-1 " + sha + " is not the Virtua Cop 3 GD-ROM (gdx-0003b, expected " + kChdSha1 + ")";
+        err = fs::path(path).filename().string() + ": SHA-1 " + sha + " is not the Virtua Cop 3 GD-ROM (gdx-0003b, expected " + kChdSha1 + ")";
         return false;
     }
     d.hunk_bytes = h->hunkbytes;
@@ -293,13 +294,13 @@ bool open_disc(const std::string& path, Disc& d, std::string& err) {
         chd_frame += u32((frames + 3) & ~3);
     }
     if (hd == ~0u) {
-        err = path + ": no GD-ROM track table";
+        err = fs::path(path).filename().string() + ": no GD-ROM track table";
         return false;
     }
     d.hd_chd_frame = hd;
     u8 pvd[2048];
     if (!d.sector(d.hd_lba + 16, pvd) || std::memcmp(pvd + 1, "CD001", 5)) {
-        err = path + ": no ISO 9660 volume in the high-density area";
+        err = fs::path(path).filename().string() + ": no ISO 9660 volume in the high-density area";
         return false;
     }
     return true;
@@ -467,7 +468,7 @@ bool use_location(const std::string& dir) {
     std::error_code ec;
     fs::create_directories(dir, ec);
     fs::current_path(dir, ec);
-    if (ec) std::fprintf(stderr, "[install] can't use %s: %s\n", dir.c_str(), ec.message().c_str());
+    if (ec) std::fprintf(stderr, "[install] can't use %s: %s\n", privacy::short_path(dir).c_str(), ec.message().c_str());
     return !ec;
 }
 
@@ -522,14 +523,14 @@ bool run(const Files& files) {
         if (t.crypt(0x85E813540F0AB405ull, true) != 0x0123456789ABCDEFull) return fail("internal error: DES self-test failed");
     }
     // 1. PIC data
-    set_status("Checking " + files.pic, 0.0f);
+    set_status("Checking " + fs::path(files.pic).filename().string(), 0.0f);
     std::vector<u8> pic;
     std::string err;
     if (!read_pic(files.pic, pic, err)) return fail(err);
     if (const std::string s = sha1_of(pic.data(), pic.size()); s != kPicSha1)
         return fail(std::string(kPicName) + " has SHA-1 " + s + ", expected " + kPicSha1 + " (wrong or bad dump)");
     // 2. Disc
-    set_status("Checking " + files.chd, 0.01f);
+    set_status("Checking " + fs::path(files.chd).filename().string(), 0.01f);
     Disc disc;
     if (!open_disc(files.chd, disc, err)) return fail(err);
     auto iso = iso_root(disc);
@@ -558,7 +559,7 @@ bool run(const Files& files) {
         std::vector<u8> buf(kChunk);
         for (u64 off = 0; off < gf.size; off += kChunk) {
             const u64 n = std::min<u64>(kChunk, gf.size - off);
-            if (!disc.read(gf.lba, off, n, buf.data())) return fail("read error in " + files.chd);
+            if (!disc.read(gf.lba, off, n, buf.data())) return fail("read error in " + fs::path(files.chd).filename().string());
             for (u64 i = 0; i + 8 <= n; i += 8) {
                 u64 v = 0;
                 for (int b = 0; b < 8; ++b) v |= u64(buf[i + b]) << (8 * b);  // little-endian block
@@ -581,7 +582,7 @@ bool run(const Files& files) {
         Fatx fx;
         if (!fx.open(img)) return fail("the built game image isn't readable (are these the right files?)");
         u64 done = 0;
-        if (!fx.extract(fx.root, tmp, done)) return fail("couldn't write the game files to " + tmp.string());
+        if (!fx.extract(fx.root, tmp, done)) return fail("couldn't write the game files (disk full or no permission?)");
     }
     set_status("Verifying", 0.97f);
     if (const std::string s = sha1_file((tmp / "vc3.xbe").string()); s != kXbeSha1)

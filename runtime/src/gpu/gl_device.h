@@ -32,6 +32,8 @@ void save(const std::string& vs, const std::string& fs);
 void for_each(const std::function<void(const std::string& vs, const std::string& fs)>& fn);
 void forget(const std::string& vs, const std::string& fs);  // no longer compiles
 bool write_file(const std::string& path, const void* a, size_t na, const void* b = nullptr, size_t nb = 0);
+// Append a Vulkan pipeline recipe (pipe_recipe.h) to vk-recipes.bin unless it is there already.
+void record_recipe(const void* recipe, size_t size);
 }  // namespace shader_store
 
 }  // namespace vc3::gpu::dev

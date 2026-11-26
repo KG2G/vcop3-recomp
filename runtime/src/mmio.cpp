@@ -1,4 +1,5 @@
 #include "mmio.h"
+#include "log.h"
 
 #include <Zydis/Zydis.h>
 #ifdef _WIN32
@@ -122,7 +123,11 @@ void set_flags_from(HostCtx& uc, uint64_t a, uint64_t b, uint64_t r, unsigned bi
 [[noreturn]] void fatal(const char* why, uint32_t guest, HostCtx& uc) {
     const uint64_t rip = uc.rip();
 #ifdef _WIN32
-    const char* fn = "?";
+    // No symbols in release builds: the offset into the executable (matched with a map).
+    char fn_buf[48];
+    std::snprintf(fn_buf, sizeof fn_buf, "vc3.exe+0x%llx",
+                  (unsigned long long)(rip - reinterpret_cast<uint64_t>(GetModuleHandleA(nullptr))));
+    const char* fn = fn_buf;
 #else
     Dl_info di{};
     const char* fn = (dladdr(reinterpret_cast<void*>(rip), &di) && di.dli_sname) ? di.dli_sname : "?";
@@ -240,6 +245,7 @@ LONG CALLBACK veh(EXCEPTION_POINTERS* ep) {
 void handler(int sig, siginfo_t* si, void* vuc) {
     const auto host = reinterpret_cast<uint8_t*>(si->si_addr);
     if (!g_mem || host < g_mem || host >= g_mem + (uint64_t(1) << 32)) {
+        log::crashed(sig == SIGBUS ? "bus error" : "segmentation fault");
         signal(sig, SIG_DFL);  // not a guest access: crash normally
         return;
     }

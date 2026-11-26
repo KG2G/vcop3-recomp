@@ -113,7 +113,7 @@ const bool g_full_sync = std::getenv("VC3_GL_FULL_SYNC") != nullptr;
 // Internal resolution scale (VC3_RES_SCALE=N, 1-8): GL copies of guest surfaces are
 // N times the guest size in each direction. Guest RAM always holds the native-size
 // image: uploads are scaled up and write-backs scaled down at that boundary.
-// Widescreen (VC3_WIDESCREEN=16:9, 16:10, 21:9, or a width/height ratio): screen-size
+// Widescreen (VC3_WIDESCREEN=auto (the display's shape), 16:9, 16:10, 21:9, or a width/height ratio): screen-size
 // surfaces (640x480) get extra width; the 4:3 picture keeps its shape in the middle
 // (so the crosshair still lines up with what the game hit-tests) and 3D extends into
 // the sides. g_wide_k is the 4:3 picture's share of the width (1: off).
@@ -2490,8 +2490,16 @@ void set_share(void* dpy, void* cfg, void* ctx) { dev::gl::set_share(dpy, cfg, c
 void configure() {
     if (const char* e = std::getenv("VC3_WIDESCREEN"); e && *e && std::strcmp(e, "0")) {
         double a = 16.0 / 9.0;
-        if (const char* c = std::strchr(e, ':')) a = std::atof(e) / std::max(0.1, std::atof(c + 1));
-        else if (std::atof(e) > 1.34) a = std::atof(e);
+        if (!std::strcmp(e, "auto")) {  // match the display's shape (4:3 or narrower: the original)
+            SDL_InitSubSystem(SDL_INIT_VIDEO);
+            const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+            a = m && m->h > 0 ? double(m->w) / double(m->h) : 4.0 / 3.0;
+            std::fprintf(stderr, "[gpu] aspect ratio: %.3f (display %dx%d)\n", std::max(a, 4.0 / 3.0), m ? m->w : 0, m ? m->h : 0);
+        } else if (const char* c = std::strchr(e, ':')) {
+            a = std::atof(e) / std::max(0.1, std::atof(c + 1));
+        } else if (std::atof(e) > 1.34) {
+            a = std::atof(e);
+        }
         g_wide_k = std::clamp((4.0 / 3.0) / a, 0.3, 1.0);
     }
     if (const char* e = std::getenv("VC3_RES_SCALE")) {

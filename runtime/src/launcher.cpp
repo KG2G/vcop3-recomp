@@ -1,5 +1,7 @@
 #include "platform.h"
 #include "launcher.h"
+#include "log.h"
+#include "privacy.h"
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -236,6 +238,7 @@ void controls_page(float label_w) {
 std::mutex g_pick_m;
 std::string g_picked[3];  // set by the file dialog callbacks (any thread): zip, chd, install folder
 install::Files g_files;
+bool g_press_main = false;  // (testing: VC3_LAUNCHER_AUTOINSTALL presses the main button)
 bool g_files_init = false;
 
 void SDLCALL on_pick(void* which, const char* const* list, int) {
@@ -323,20 +326,28 @@ void game_files_page(SDL_Window* win, float label_w) {
         }
     }
     ImGui::Spacing();
+    // Installing starts from the INSTALL AND PLAY button below; here only a reinstall.
     const bool busy = pr.state == 1;
-    ImGui::BeginDisabled(busy || g_files.pic.empty() || g_files.chd.empty());
-    if (ImGui::Button(ok ? "Re-install" : "Install", ImVec2(ImGui::CalcTextSize("Re-install").x * 2, 0))) {
-        settings::save();  // keep the chosen install folder even if the launcher is closed afterwards
-        install::start(g_files);
+    if (ok) {
+        ImGui::BeginDisabled(busy || g_files.pic.empty() || g_files.chd.empty());
+        if (ImGui::Button("Reinstall", ImVec2(ImGui::CalcTextSize("Reinstall").x * 2, 0))) {
+            settings::save();  // keep the chosen install folder even if the launcher is closed afterwards
+            install::start(g_files);
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled | ImGuiHoveredFlags_DelayShort))
+            ImGui::SetTooltip("Install the game files again from the zip and CHD above.");
+    } else if (!busy && pr.state != 3) {
+        ImGui::TextDisabled(g_files.pic.empty() || g_files.chd.empty() ? "Pick both files, then press INSTALL AND PLAY."
+                                                                       : "Press INSTALL AND PLAY below.");
     }
-    ImGui::EndDisabled();
     if (pr.state != 0) {
         std::string msg;
         {
             std::lock_guard lk(pr.m);
             msg = pr.message;
         }
-        ImGui::SameLine();
+        if (ok) ImGui::SameLine();
         ImGui::ProgressBar(pr.fraction, ImVec2(-1, 0), pr.state == 1 ? nullptr : (pr.state == 2 ? "Done" : "Failed"));
         if (pr.state == 3) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", msg.c_str());
         else ImGui::TextDisabled("%s", msg.c_str());
@@ -478,7 +489,12 @@ bool run() {
             static bool first = true;
             const bool missing = first && !install::installed();
             first = false;
-            if (ImGui::BeginTabItem("Game files", nullptr, missing ? ImGuiTabItemFlags_SetSelected : 0)) {
+            // A failed install shows why on this tab: switch to it once.
+            static bool failed_shown = false;
+            const bool failed = install::progress().state == 3;
+            const bool show_failure = failed && !failed_shown;
+            failed_shown = failed;
+            if (ImGui::BeginTabItem("Game files", nullptr, missing || show_failure ? ImGuiTabItemFlags_SetSelected : 0)) {
                 ImGui::BeginChild("files", ImVec2(0, -footer));
                 game_files_page(win, label_w);
                 ImGui::EndChild();
@@ -492,18 +508,52 @@ bool run() {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.10f, 0.12f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.15f, 0.17f, 1.0f));
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        const bool ready = install::progress().state != 1 && install::installed();
-        ImGui::BeginDisabled(!ready);
-        if (ImGui::Button(ready ? "PLAY" : "PLAY (install the game files first)", ImVec2(bw, 0))) {
-            play = true;
-            done = true;
+        // One button: PLAY once the game is installed; before that INSTALL AND PLAY installs
+        // from the picked files and starts the game when it's done.
+        static bool play_after_install = false;
+        install::Progress& ipr = install::progress();
+        const bool installing = ipr.state == 1;
+        const bool ready = !installing && install::installed();
+        const bool can_install = !installing && !ready && !g_files.pic.empty() && !g_files.chd.empty();
+        if (play_after_install && !installing) {
+            play_after_install = false;
+            if (ready) {
+                play = true;
+                done = true;
+            }
+        }
+        char label[96];
+        if (ready) std::snprintf(label, sizeof label, "PLAY");
+        else if (installing) std::snprintf(label, sizeof label, "Installing... %d%%", int(ipr.fraction * 100.0f));
+        else if (can_install) std::snprintf(label, sizeof label, "INSTALL AND PLAY");
+        else std::snprintf(label, sizeof label, "PLAY (pick your game files first)");
+        ImGui::BeginDisabled(!ready && !can_install);
+        const bool pressed = ImGui::Button(label, ImVec2(bw, 0)) || (g_press_main && (ready || can_install));
+        g_press_main = false;
+        if (pressed) {
+            if (ready) {
+                play = true;
+                done = true;
+            } else {
+                settings::save();  // keep the chosen install folder
+                install::start(g_files);
+                play_after_install = true;
+            }
         }
         ImGui::EndDisabled();
         ImGui::PopStyleColor(2);
         ImGui::SameLine();
         if (ImGui::Button("Quit", ImVec2(bw, 0))) done = true;
         ImGui::Spacing();
-        ImGui::TextDisabled("Settings: %s", settings::file_path().c_str());
+        // The log, for bug reports (it holds no personal information: see log.h).
+        if (!log::folder().empty()) {
+            if (ImGui::SmallButton("Open log folder")) SDL_OpenURL(("file://" + log::folder()).c_str());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("vc3.log describes your system, settings and any problems (no names or folder paths).\n"
+                                  "Attach it when reporting a problem.");
+            ImGui::SameLine();
+        }
+        ImGui::TextDisabled("Settings: %s", privacy::scrub(settings::file_path()).c_str());  // (in screenshots too)
         ImGui::End();
 
         ImGui::Render();
@@ -516,15 +566,15 @@ bool run() {
             std::lock_guard lk(g_pick_m);
             g_picked[2] = ad;
         }
-        // VC3_LAUNCHER_AUTOINSTALL="zip|chd" (testing): press Install with these files at frame 5.
+        // VC3_LAUNCHER_AUTOINSTALL="zip|chd" (testing): pick these files and press INSTALL AND
+        // PLAY at frame 5, as a player would.
         if (const char* ai = std::getenv("VC3_LAUNCHER_AUTOINSTALL"); ai && ImGui::GetFrameCount() == 5) {
             const std::string v = ai;
             const size_t bar = v.find('|');
             if (bar != std::string::npos) {
                 g_files = {v.substr(0, bar), v.substr(bar + 1)};
                 g_files_init = true;
-                settings::save();
-                install::start(g_files);
+                g_press_main = true;
             }
         }
         // VC3_LAUNCHER_AUTOPLAY=N (testing): press PLAY after N frames, as a player would.
@@ -555,7 +605,7 @@ bool run() {
     ImGui::DestroyContext();
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
-    if (play && !settings::save()) std::fprintf(stderr, "[launcher] could not save %s\n", settings::file_path().c_str());
+    if (play && !settings::save()) std::fprintf(stderr, "[launcher] could not save the settings file\n");
     return play;
 }
 

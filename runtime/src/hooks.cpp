@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "log.h"
 #include "vc3/helpers.h"
 #include "vc3/recomp.h"
 #include "vc3/memory.h"
@@ -288,6 +289,12 @@ void guest_hook(Cpu& c, uint32_t entry) {
             if (final_stage && stage >= 0 && stage <= 2 && (player_in_game(0) || player_in_game(1))) {
                 wr<int32_t>(c.esp + 4, 3);
                 gpu::pgraph::glb::hide_stale_map();  // not the chosen mission's map over its intro
+            }
+            {  // for the log: what the game was doing when something went wrong
+                const int32_t s = rd<int32_t>(c.esp + 4);
+                static const char* const kNames[] = {"mission 1", "mission 2", "mission 3", "final stage"};
+                std::fprintf(stderr, "[game] %.0f s: %s\n", log::uptime(),
+                             s >= 0 && s <= 3 ? kNames[s] : s == 9 ? "attract demo" : "stage");
             }
             break;
         }

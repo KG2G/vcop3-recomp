@@ -107,7 +107,7 @@ std::vector<ScriptEvent> load_script() {
         }
         ev.push_back(e);
     }
-    std::fprintf(stderr, "[input] loaded %zu scripted events from %s\n", ev.size(), path);
+    std::fprintf(stderr, "[input] loaded %zu scripted events\n", ev.size());
     return ev;
 }
 }  // namespace

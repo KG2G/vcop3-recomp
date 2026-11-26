@@ -35,6 +35,8 @@
 #include "kernel/kernel.h"
 #include "kernel/ps.h"
 #include "install.h"
+#include "log.h"
+#include "privacy.h"
 #include "launcher.h"
 #include "loader.h"
 #include "settings.h"
@@ -45,46 +47,6 @@
 #include "xbe.h"
 
 using namespace vc3;
-
-// Everything the program prints (stdout and stderr) also goes to vc3.log in the data
-// folder (the previous run's log is kept as vc3.prev.log), so a crash can be reported
-// without a terminal.
-#ifdef _WIN32
-// Windows: the game is a GUI program without a console; everything goes to the file.
-static void start_log() {
-    std::error_code ec;
-    std::filesystem::rename("vc3.log", "vc3.prev.log", ec);
-    if (std::FILE* t = std::fopen("vc3.log", "w")) std::fclose(t);  // a fresh log
-    // Both streams append (each write goes to the end), so their lines don't overwrite each other.
-    if (std::freopen("vc3.log", "a", stderr)) std::setvbuf(stderr, nullptr, _IONBF, 0);
-    if (FILE* o = std::freopen("vc3.log", "a", stdout)) std::setvbuf(o, nullptr, _IONBF, 0);
-}
-#else
-struct LogSink { int term, file; };
-static ssize_t log_write(void* c, const char* buf, size_t n) {
-    const auto* s = static_cast<const LogSink*>(c);
-    if (write(s->term, buf, n) < 0) {}
-    if (write(s->file, buf, n) < 0) {}
-    return ssize_t(n);
-}
-static void start_log() {
-    std::error_code ec;
-    std::filesystem::rename("vc3.log", "vc3.prev.log", ec);
-    const int file = open("vc3.log", O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
-    if (file < 0) return;
-    // Written straight through (no pipe, no buffering), so the lines before a crash land too.
-    static LogSink err{dup(STDERR_FILENO), file}, out{dup(STDOUT_FILENO), file};
-    cookie_io_functions_t io{nullptr, log_write, nullptr, nullptr};
-    if (FILE* e = fopencookie(&err, "w", io)) {
-        std::setvbuf(e, nullptr, _IONBF, 0);
-        stderr = e;
-    }
-    if (FILE* o = fopencookie(&out, "w", io)) {
-        std::setvbuf(o, nullptr, _IOLBF, 0);
-        stdout = o;
-    }
-}
-#endif
 
 namespace vc3::hwwatch { void init(); }
 
@@ -149,14 +111,25 @@ int main(int argc, char** argv) {
             // (a source checkout counts before the game is installed: --install fills its work/)
             if (std::filesystem::exists(dir / "work" / "fs") || std::filesystem::exists(dir / "config" / "vc3_entries.txt")) {
                 std::filesystem::current_path(dir, ec);
-                std::printf("[main] using project directory %s\n", dir.c_str());
+                std::printf("[main] using a project directory\n");
                 found = true;
                 break;
             }
         if (!found) install::use_location(install::default_location());
     }
     if (no_settings || settings::get("install_dir").empty()) install::set_default_location(std::filesystem::current_path().string());
-    if (!getenv("VC3_NO_LOG")) start_log();
+    // The log: in the per-user data folder when the game is installed elsewhere (one place
+    // to find it), else beside the game (the data folder too, by default; tests and source
+    // checkouts keep theirs in place).
+    if (!getenv("VC3_NO_LOG")) {
+        std::string dir = std::filesystem::current_path().string();
+        if (!no_settings && !settings::get("install_dir").empty())
+            if (char* pref = SDL_GetPrefPath("vcop3-recomp", "vcop3-recomp")) {
+                dir = pref;
+                SDL_free(pref);
+            }
+        log::start(dir);
+    }
     if (!install_pic.empty()) return install::run({install_pic, install_chd}) ? 0 : 1;
 
     if (vc3_func_table_size == 0) {
@@ -207,7 +180,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     auto xbe = Xbe::load(xbe_path, err);
-    if (!xbe) { std::fprintf(stderr, "error: %s: %s\n", xbe_path.c_str(), err.c_str()); return 1; }
+    if (!xbe) { std::fprintf(stderr, "error: %s: %s\n", privacy::short_path(xbe_path).c_str(), err.c_str()); return 1; }
     if (xbe->entry != vc3_entry_point) {
         std::fprintf(stderr, "error: %s entry %08x does not match the recompiled code (%08x)\n",
                      xbe_path.c_str(), xbe->entry, vc3_entry_point);
@@ -228,10 +201,24 @@ int main(int argc, char** argv) {
         SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 0);  // an alpha channel would make the window translucent
         SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
         const bool vulkan = gpu::wants_vulkan_window();
-        int ww = 640, wh = 480;  // VC3_WINDOW_SIZE=WxH
+        int ww = 640, wh = 480;  // VC3_WINDOW_SIZE=WxH, or auto
         if (const char* ws = std::getenv("VC3_WINDOW_SIZE"); ws && std::strchr(ws, 'x')) {
             ww = std::max(320, std::atoi(ws));
             wh = std::max(240, std::atoi(std::strchr(ws, 'x') + 1));
+        } else if (ws && !std::strcmp(ws, "auto")) {
+            // The picture's shape (the aspect ratio setting), about 80% of the screen's height.
+            const double aspect = (4.0 / 3.0) / gpu::pgraph::glb::widescreen_factor();
+            SDL_Rect r{};
+            if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &r) && r.w > 0 && r.h > 0) {
+                double h = r.h * 0.8, w = h * aspect;
+                if (w > r.w * 0.9) {
+                    w = r.w * 0.9;
+                    h = w / aspect;
+                }
+                ww = std::max(320, int(w) & ~1);
+                wh = std::max(240, int(h) & ~1);
+            }
+            std::fprintf(stderr, "[main] window %dx%d\n", ww, wh);
         }
         win = SDL_CreateWindow("Virtua Cop 3 (recomp)", ww, wh,
                                SDL_WINDOW_RESIZABLE | (vulkan ? SDL_WINDOW_VULKAN : SDL_WINDOW_OPENGL));
@@ -257,6 +244,7 @@ int main(int argc, char** argv) {
     }
     audio::apu::init(!headless);
     gpu::init_hardware();
+    log::header();
     if (!load_xbe(*xbe, err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
 
     std::printf("[main] starting guest at %08x\n", xbe->entry);
@@ -340,5 +328,6 @@ int main(int argc, char** argv) {
     audio::apu::shutdown();
     SDL_SetWindowFullscreen(win, false);
     SDL_SyncWindow(win);
+    log::end("closed normally");
     std::_Exit(0);
 }

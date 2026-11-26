@@ -14,13 +14,52 @@
 //    (cube); varyings at fixed locations; the vertex index is VERTEX_ID (the device
 //    defines it). The Vulkan backend compiles the same source.
 #pragma once
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
+#include <thread>
 
 struct SDL_Window;
 
 namespace vc3::gpu::dev {
+
+// A shader met for the first time builds in the background (startup builds every known
+// one, see shader_seed). A draw that needs one still building waits until it is ready,
+// so nothing ever pops in; that can cost one frame once, the first time a shader not in
+// the cache shows up. VC3_SHADER_WAIT_MS=N caps the wait per guest frame (testing).
+class ShaderWait {
+public:
+    void new_frame() { left_ns_ = budget_ns(); }
+    // Waits while ready() is false and budget is left; returns ready().
+    template <class Ready>
+    bool wait(Ready&& ready) {
+        if (ready()) return true;
+        if (left_ns_ <= 0) return false;
+        const auto t0 = std::chrono::steady_clock::now();
+        bool ok = false;
+        while (!(ok = ready())) {
+            const long long spent = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+            if (spent >= left_ns_) break;
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+        left_ns_ -= std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        return ok;
+    }
+
+private:
+    static long long budget_ns() {
+        static const long long ns = [] {
+            const char* e = std::getenv("VC3_SHADER_WAIT_MS");
+            return e ? (long long)(std::atof(e) * 1e6) : (1LL << 62);  // default: no cap
+        }();
+        return ns;
+    }
+    long long left_ns_ = budget_ns();
+};
+
 
 using u8 = uint8_t;
 using u32 = uint32_t;

@@ -7,6 +7,10 @@ or two while they compile: a visible glitch). Input: work/shadercache/v4/sources
 (translated game shaders) and vk-recipes.bin (Vulkan pipeline states). Output goes to
 generated/ (never committed: it is derived from the game).
 
+More caches (e.g. installs that were really played) can be merged in: list their
+shadercache/v4 folders, one per line, in work/seed_sources.txt (local, never committed).
+Only the translated shaders and pipeline recipes are taken (no driver caches).
+
 Blob: b"VC3SEED1", u32 count, then per entry: u8 kind (0 source, 1 recipes), u16 name
 length, name, u32 size, data.
 """
@@ -16,17 +20,43 @@ root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 cache = os.path.join(root, "work", "shadercache", "v4")
 out = os.path.join(root, "generated", "shader_seed.cpp")
 
-entries = []
-src = os.path.join(cache, "sources")
-if os.path.isdir(src):
-    for n in sorted(os.listdir(src)):
-        if n.endswith(".glsl"):
-            with open(os.path.join(src, n), "rb") as f:
-                entries.append((0, n, f.read()))
-rec = os.path.join(cache, "vk-recipes.bin")
-if os.path.exists(rec):
-    with open(rec, "rb") as f:
-        entries.append((1, "vk-recipes.bin", f.read()))
+RECIPE_SIZE = 136  # sizeof(Recipe) in vk_device.cpp: u64 program key + 128-byte PipeKey
+
+caches = [cache]
+extra = os.path.join(root, "work", "seed_sources.txt")
+if os.path.exists(extra):
+    with open(extra) as f:
+        caches += [l.strip() for l in f if l.strip() and not l.startswith("#")]
+
+sources, recipes, seen = {}, [], set()
+for c in caches:
+    if not os.path.isdir(c):
+        print(f"skipping missing cache: {c}")
+        continue
+    src = os.path.join(c, "sources")
+    if os.path.isdir(src):
+        for n in sorted(os.listdir(src)):
+            if n.endswith(".glsl") and n not in sources:
+                with open(os.path.join(src, n), "rb") as f:
+                    data = f.read()
+                if b"\0" in data:  # vertex shader, NUL, fragment shader
+                    sources[n] = data
+    rec = os.path.join(c, "vk-recipes.bin")
+    if os.path.exists(rec):
+        with open(rec, "rb") as f:
+            data = f.read()
+        if len(data) % RECIPE_SIZE:
+            print(f"skipping {rec}: not whole recipes (recipe layout changed?)")
+            continue
+        for i in range(0, len(data), RECIPE_SIZE):
+            r = data[i:i + RECIPE_SIZE]
+            if r not in seen:
+                seen.add(r)
+                recipes.append(r)
+
+entries = [(0, n, d) for n, d in sorted(sources.items())]
+if recipes:
+    entries.append((1, "vk-recipes.bin", b"".join(recipes)))
 if not entries:
     sys.exit("no shader cache in work/shadercache/v4 (play the game once first)")
 
@@ -45,5 +75,5 @@ with open(out, "w") as f:
         f.write(",".join(str(b) for b in blob[i:i + 32]) + ",\n")
     f.write("};\n")
     f.write(f'const int kRegistered = (vc3::shader_seed::set(kSeed, sizeof kSeed, "{digest}"), 0);\n}}  // namespace\n')
-print(f"{out}: {len(entries) - (1 if os.path.exists(rec) else 0)} shader programs, "
-      f"{len(blob)} bytes, seed {digest}")
+print(f"shader seed: {len(sources)} shader programs, {len(recipes)} pipeline recipes from "
+      f"{len(caches)} cache(s), {len(blob)} bytes, seed {digest}")

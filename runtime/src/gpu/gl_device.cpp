@@ -3,6 +3,7 @@
 // GPU memory).
 #include "gpu/device.h"
 #include "gpu/gl_device.h"
+#include "gpu/pipe_recipe.h"
 
 #include <epoxy/egl.h>
 #include <epoxy/gl.h>
@@ -173,11 +174,12 @@ void save_binary(GLuint prog, const SrcKey& k) {
 
 // Background compilation (VC3_ASYNC_SHADERS, default on where the driver compiles in
 // parallel: GL_KHR/ARB_parallel_shader_compile): a program seen for the first time is
-// compiled by the driver's threads while the game keeps running; draws that need it are
-// skipped until it is ready (a frame or two, once ever), instead of stalling the frame.
+// compiled by the driver's threads while the game keeps running; a draw that needs it
+// waits for it (ShaderWait, device.h).
 bool g_async = false;
 struct PendingProg { GLuint vs = 0, fs = 0; SrcKey k{}; };
 std::unordered_map<GLuint, PendingProg> g_pending;
+ShaderWait g_shader_wait;
 
 GLuint start_shader(GLenum type, const std::string& src) {
     const GLuint sh = glCreateShader(type);
@@ -552,6 +554,7 @@ public:
 
     // ---- rendering
     void set_target(Tex color, Tex depth, int w, int h) override {
+        depth_bound_ = depth.id != 0;
         glBindFramebuffer(GL_FRAMEBUFFER, fbo(color.id, depth.id));
         glViewport(0, 0, w, h);
         target_w_ = w;
@@ -583,7 +586,9 @@ public:
     }
     Program program(const std::string& vs_in, const std::string& fs) override {
         shader_store::save(vs_in, fs);
-        return Program{build_program(gl_vertex_source(vs_in), fs)};
+        const GLuint prog = build_program(gl_vertex_source(vs_in), fs);
+        vk_prog_key_[prog] = program_key(vs_in, fs);
+        return Program{prog};
     }
     size_t ubo_align() const override { return size_t(ubo_align_); }
 
@@ -619,7 +624,13 @@ public:
     }
 
     bool draw(const DrawCall& dc) override {
-        if (!program_ready(dc.prog.id)) return false;  // still compiling in the background
+        if (!g_shader_wait.wait([&] { return program_ready(dc.prog.id); })) return false;  // still compiling
+        // The Vulkan pipeline this draw would need, for the cache (and the shader seed).
+        if (auto it = vk_prog_key_.find(dc.prog.id); it != vk_prog_key_.end()) {
+            Recipe r{it->second, canonical_pipe_key(dc, depth_bound_)};
+            r.key.prog = 0;
+            shader_store::record_recipe(&r, sizeof r);
+        }
         glUseProgram(dc.prog.id);
         // Textures (2D units 4-7, cube 8-11, as the shaders' bindings)
         for (int i = 0; i < 8; ++i) {
@@ -777,6 +788,7 @@ public:
         if (s) glDeleteSync(reinterpret_cast<GLsync>(uintptr_t(s)));
     }
     void flush() override {
+        g_shader_wait.new_frame();
         // Buffers of oversized draws: free those the GPU has finished with.
         if (!big_.empty()) {
             big_fences_.push_back({glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0), std::move(big_)});
@@ -819,6 +831,8 @@ private:
     std::map<std::pair<GLuint, GLuint>, GLuint> fbos_;
     std::vector<Read> reads_;
     std::vector<GLuint> big_;
+    std::unordered_map<GLuint, u64> vk_prog_key_;  // program -> program_key() of its sources
+    bool depth_bound_ = false;
     std::vector<std::pair<GLsync, std::vector<GLuint>>> big_fences_;
 };
 
@@ -937,6 +951,26 @@ void for_each(const std::function<void(const std::string&, const std::string&)>&
         const std::string vs = all.substr(0, z), fs = all.substr(z + 1);
         g_saved.insert(src_key(vs, fs));
         fn(vs, fs);
+    }
+}
+
+void record_recipe(const void* recipe, size_t size) {
+    if (!g_enabled) return;
+    static std::unordered_set<u64> known;
+    static bool loaded = false;
+    const char* const path = "work/shadercache/v4/vk-recipes.bin";
+    if (!loaded) {  // what earlier runs (and the seed) recorded
+        loaded = true;
+        if (std::FILE* f = std::fopen(path, "rb")) {
+            std::vector<u8> r(size);
+            while (std::fread(r.data(), 1, size, f) == size) known.insert(recipe_fnv(r.data(), size));
+            std::fclose(f);
+        }
+    }
+    if (!known.insert(recipe_fnv(recipe, size)).second) return;
+    if (std::FILE* f = std::fopen(path, "ab")) {
+        std::fwrite(recipe, 1, size, f);
+        std::fclose(f);
     }
 }
 
