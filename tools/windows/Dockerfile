@@ -31,7 +31,7 @@ RUN git clone --depth 1 --branch v1.4.309 https://github.com/KhronosGroup/Vulkan
       -DCMAKE_INSTALL_PREFIX=$PREFIX -DVULKAN_HEADERS_INSTALL_DIR=$PREFIX -DUSE_MASM=OFF -DBUILD_TESTS=OFF && \
     cmake --build /tmp/vkl/b && cmake --install /tmp/vkl/b && rm -rf /tmp/vkh /tmp/vkl
 # shaderc (GLSL -> SPIR-V for the Vulkan renderer), static
-RUN git clone --depth 1 --branch v2025.2 https://github.com/google/shaderc.git /tmp/shaderc && \
+RUN git clone --depth 1 --branch v2026.4 https://github.com/google/shaderc.git /tmp/shaderc && \
     cd /tmp/shaderc && ./utils/git-sync-deps && \
     cmake -S /tmp/shaderc -B /tmp/shaderc/b -G Ninja -DCMAKE_TOOLCHAIN_FILE=/opt/toolchain.cmake -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX=$PREFIX -DSHADERC_SKIP_TESTS=ON -DSHADERC_SKIP_EXAMPLES=ON -DSHADERC_SKIP_COPYRIGHT_CHECK=ON \

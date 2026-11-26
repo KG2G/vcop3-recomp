@@ -131,8 +131,7 @@ u32 wait_for_objects(const std::vector<u32>& objs, bool wait_all, std::optional<
     if (auto r = try_satisfy()) return *r;
     if (deadline && *deadline <= steady_clock::now()) {
         lk.unlock();
-        sched::gil_release();  // a zero-timeout poll still yields, like a real wait would
-        sched::gil_acquire();
+        sched::yield_to_equals();  // a zero-timeout poll lets equals run, never lower priorities
         return STATUS_TIMEOUT;
     }
 

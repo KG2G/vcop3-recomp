@@ -76,9 +76,14 @@ constexpr u64 kPartitionSize[] = {0x1DD1B0000ull /*0*/, 0x1312D6000ull, 0x1F4000
                                   0x2EE00000ull, 0x2EE00000ull};
 
 void init_namespace() {
-    static bool done = false;
-    if (done) return;
-    done = true;
+    // Set up for the current data folder, and again if that changed since (the launcher can
+    // switch to another install folder after this first ran at startup: the hard-disk images
+    // must be where the game is played from, or it finds no disk and asks to reboot).
+    static fs::path done_for;
+    std::error_code cwd_ec;
+    const fs::path cwd = fs::current_path(cwd_ec);
+    if (!done_for.empty() && cwd == done_for) return;
+    done_for = cwd;
     const char* root = std::getenv("VC3_GAME_DIR");
     const fs::path game = root ? root : "work/fs";
     const fs::path hdd = "work/hdd";

@@ -11,7 +11,7 @@ with a small runtime that stands in for the Chihiro hardware: the Xbox kernel, t
 | `vcop3.zip` (containing `317-0354-com.data`) | the security PIC data | `9f0f4bf6b15f3b6eeea81eaa27b3d25bd94110da` (`317-0354-com.data`) |
 | `gdx-0003b.chd` | the GD-ROM | `4268aadb83c880d4f3dab1d43ddd0a3a2f8befa2` (CHD data hash) |
 
-The installer checks both, decrypts the game and unpacks it, then checks the game executable
+The installer checks both, builds the game and unpacks it, then checks the game executable
 (`vc3.xbe`, SHA-1 `e22c2b0ecf091a2388d9e3ca7eb9e07ce54d4727`) against the one this code was
 recompiled from.
 

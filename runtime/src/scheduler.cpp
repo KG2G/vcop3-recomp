@@ -1,5 +1,6 @@
 #include "scheduler.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <climits>
@@ -43,6 +44,7 @@ int g_owner_priority = 0;
 int64_t g_seq = 0, g_front_seq = 0;
 std::vector<Waiter*> g_waiters;
 std::atomic<int> g_best_waiting{INT_MIN};  // highest priority among waiters (INT_MIN: none)
+std::atomic<int64_t> g_owner_since{0};      // steady-clock ns when the current owner got the lock
 void (*g_hook)() = nullptr;
 bool g_fifo = false;  // VC3_SCHED_FIFO=1: ignore priorities (the old behaviour; debugging aid)
 
@@ -104,6 +106,7 @@ static void acquire_raw(bool front = false) {
         g_owned = true;
         g_owner_priority = prio;
         t_acquired = std::chrono::steady_clock::now();
+        g_owner_since.store(t_acquired.time_since_epoch().count(), std::memory_order_relaxed);
         return;
     }
     // NT ready-queue placement: a thread preempted by a higher-priority one goes
@@ -125,7 +128,7 @@ void gil_acquire() {
 }
 
 // Hand the lock to a higher-priority waiter and get it back ahead of our equals.
-static void yield_preempted() {
+void yield_preempted() {
     gil_release();
     acquire_raw(true);
     if (g_hook) g_hook();
@@ -168,6 +171,7 @@ void gil_release() {
             g_waiters.erase(g_waiters.begin() + std::ptrdiff_t(best));
             update_best();
             w->granted = true;
+            g_owner_since.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
             g_owned = true;
             g_owner_priority = g_fifo ? 0 : w->priority();
         }
@@ -186,10 +190,15 @@ void start_preemption() {
         // threads run before their creator can suspend them, which the real kernel
         // wouldn't, and which deadlocked CRI's thread setup. VC3_SLICE_US overrides.
         static const int slice_us = std::getenv("VC3_SLICE_US") ? std::atoi(std::getenv("VC3_SLICE_US")) : 20000;
+        // The slice is the owner's own: counted from when it got the lock (like NT's
+        // per-thread quantum), so a thread that just got the CPU isn't cut off at once.
         std::thread([] {
+            const int64_t slice_ns = int64_t(slice_us) * 1000;
             for (;;) {
-                std::this_thread::sleep_for(std::chrono::microseconds(slice_us));
-                if (g_best_waiting.load(std::memory_order_relaxed) != INT_MIN)
+                std::this_thread::sleep_for(std::chrono::microseconds(std::max(slice_us / 4, 250)));
+                if (g_best_waiting.load(std::memory_order_relaxed) == INT_MIN) continue;
+                const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+                if (now - g_owner_since.load(std::memory_order_relaxed) >= slice_ns)
                     g_yield_request.store(true, std::memory_order_relaxed);
             }
         }).detach();
@@ -212,12 +221,20 @@ void preempt_for(int prio) {
 
 // A strictly higher-priority thread is waiting (preemption, not time-slice end).
 bool preempted() { return g_best_waiting.load(std::memory_order_relaxed) > my_priority(); }
-void yield_preempted_public() { yield_preempted(); }
 
 bool should_yield() {
     // Time slices only rotate among threads of equal priority; a lower-priority
     // thread never runs while a higher one is ready.
     return g_best_waiting.load(std::memory_order_relaxed) >= my_priority();
+}
+
+void yield_to_equals() {
+    if (preempted()) {
+        yield_preempted();
+    } else if (should_yield()) {
+        gil_release();
+        gil_acquire();
+    }
 }
 
 }  // namespace sched
@@ -237,7 +254,7 @@ void yield_point(Cpu& c) {
     }
     sched::g_yields.fetch_add(1, std::memory_order_relaxed);
     if (sched::preempted()) {
-        sched::yield_preempted_public();
+        sched::yield_preempted();
     } else {
         sched::gil_release();
         sched::gil_acquire();

@@ -268,7 +268,7 @@ void game_files_page(SDL_Window* win, float label_w) {
     ImGui::Spacing();
     ImGui::TextWrapped("Virtua Cop 3 needs your own dump of the game (MAME set): the vcop3 zip with the "
                        "security chip data (317-0354-com.data) and the GD-ROM image gdx-0003b.chd. They are "
-                       "checked by SHA-1, then the game is decrypted and unpacked (about 500 MB).");
+                       "checked by SHA-1, then the game is built and unpacked (about 500 MB).");
     ImGui::Spacing();
     ImGui::TextWrapped("Place them in the roms folder next to the program (also as roms/vcop3/gdx-0003b.chd), "
                        "or pick them below:");
@@ -511,6 +511,28 @@ bool run() {
         SDL_SetRenderDrawColor(ren, 15, 18, 26, 255);
         SDL_RenderClear(ren);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), ren);
+        // VC3_LAUNCHER_AUTODIR=folder (testing): pick it as the install folder at frame 3.
+        if (const char* ad = std::getenv("VC3_LAUNCHER_AUTODIR"); ad && ImGui::GetFrameCount() == 3) {
+            std::lock_guard lk(g_pick_m);
+            g_picked[2] = ad;
+        }
+        // VC3_LAUNCHER_AUTOINSTALL="zip|chd" (testing): press Install with these files at frame 5.
+        if (const char* ai = std::getenv("VC3_LAUNCHER_AUTOINSTALL"); ai && ImGui::GetFrameCount() == 5) {
+            const std::string v = ai;
+            const size_t bar = v.find('|');
+            if (bar != std::string::npos) {
+                g_files = {v.substr(0, bar), v.substr(bar + 1)};
+                g_files_init = true;
+                settings::save();
+                install::start(g_files);
+            }
+        }
+        // VC3_LAUNCHER_AUTOPLAY=N (testing): press PLAY after N frames, as a player would.
+        if (const char* ap = std::getenv("VC3_LAUNCHER_AUTOPLAY"); ap && ImGui::GetFrameCount() >= std::atoi(ap) &&
+                                                                  install::progress().state != 1 && install::installed()) {
+            play = true;
+            done = true;
+        }
         // VC3_LAUNCHER_SHOT=file.ppm: save the launcher as drawn and close it (testing).
         if (const char* shot = std::getenv("VC3_LAUNCHER_SHOT"); shot && ImGui::GetFrameCount() == 20) {
             if (SDL_Surface* s = SDL_RenderReadPixels(ren, nullptr)) {

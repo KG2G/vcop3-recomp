@@ -253,15 +253,17 @@ KEXPORT(NtSuspendThread) {
 KEXPORT(KeDelayExecutionThread) {
     const s64 iv = rd<s64>(a[2]);
     const s64 rel = iv < 0 ? -iv : std::max<s64>(0, iv - system_time_100ns());
+    if (rel == 0) {  // Sleep(0): only threads of equal or higher priority get to run
+        sched::yield_to_equals();
+        return STATUS_SUCCESS;
+    }
     sched::Unlocked unlocked;
-    if (rel == 0) std::this_thread::yield();
-    else std::this_thread::sleep_for(std::chrono::nanoseconds(rel * 100));
+    std::this_thread::sleep_for(std::chrono::nanoseconds(rel * 100));
     return STATUS_SUCCESS;
 }
 
 KEXPORT(NtYieldExecution) {
-    sched::gil_release();
-    sched::gil_acquire();
+    sched::yield_to_equals();
     return STATUS_SUCCESS;
 }
 
@@ -282,11 +284,12 @@ KEXPORT(KeSetBasePriorityThread) {
     wr<u8>(t->kthread + 0x32, u8(prio));
     sched::priority_changed();
     if (trace_enabled()) std::fprintf(stderr, "[ps] thread %u priority %d (increment %d)\n", t->id, prio, inc);
-    // Lowering our own priority below a waiting thread's lets it run now.
-    if (t == t_self && sched::should_yield()) {
-        sched::gil_release();
-        sched::gil_acquire();
-    }
+    // Lowering our own priority below a waiting thread's lets it run now; an equal one
+    // waits for the time slice, as on NT. CRI's lock drops back from 15 to the server
+    // threads' shared priority on every unlock, thousands of times a second: handing
+    // over there let one server thread run inside another's loop (and free a stream it
+    // was walking -- a crash right as a mission starts).
+    if (t == t_self && sched::preempted()) sched::yield_preempted();
     return u32(old);
 }
 KEXPORT(KeSetDisableBoostThread) { return 0; }

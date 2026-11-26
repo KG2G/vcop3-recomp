@@ -30,7 +30,15 @@ void start_preemption();  // idempotent
 // The calling host thread's scheduling priority (a guest thread's current priority;
 // read on every acquisition). Threads without one outrank all guest threads.
 void set_priority_source(const std::atomic<int>* priority);
+// A thread of equal or higher priority is waiting (time-slice rotation may hand over).
 bool should_yield();
+// A strictly higher-priority thread is waiting; yield_preempted() hands it the lock and
+// gets it back ahead of the caller's equals (NT puts a preempted thread at the front).
+bool preempted();
+void yield_preempted();
+// Give the lock to a waiter of equal or higher priority, if any (Sleep(0) / NtYieldExecution
+// / an unsatisfied zero-timeout wait). Never lets a lower-priority thread in.
+void yield_to_equals();
 // A thread of priority `prio` was just made ready: if it outranks the caller, let it
 // run first (as the single-core kernel's immediate preemption would).
 void preempt_for(int prio);

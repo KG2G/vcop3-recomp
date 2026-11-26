@@ -3,6 +3,8 @@
 # (tools/windows/Dockerfile). Needs docker and the generated code (generated/).
 set -e
 root=$(cd "$(dirname "$0")/../.." && pwd)
+# Known shaders from the local cache (work/shadercache), built at startup by fresh installs.
+python3 "$root/tools/make_shader_seed.py" || echo "warning: no shader seed (fresh installs compile shaders while playing)"
 docker build -t vc3-windows "$root/tools/windows"
 docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$root:/src" -w /src vc3-windows sh -c '
   set -e

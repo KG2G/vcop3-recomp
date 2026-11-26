@@ -566,7 +566,7 @@ bool run(const Files& files) {
                 for (int b = 0; b < 8; ++b) buf[i + b] = u8(v >> (8 * b));
             }
             out.write(reinterpret_cast<const char*>(buf.data()), std::streamsize(n));
-            set_status("Decrypting the game (" + std::to_string((off + n) * 100 / gf.size) + "%)",
+            set_status("Building the game (" + std::to_string((off + n) * 100 / gf.size) + "%)",
                        0.02f + 0.68f * float(off + n) / float(gf.size));
         }
         if (!out) return fail("write error: " + img);
@@ -579,7 +579,7 @@ bool run(const Files& files) {
     fs::create_directories(tmp);
     {
         Fatx fx;
-        if (!fx.open(img)) return fail("the decrypted image isn't a FATX file system (wrong key?)");
+        if (!fx.open(img)) return fail("the built game image isn't readable (are these the right files?)");
         u64 done = 0;
         if (!fx.extract(fx.root, tmp, done)) return fail("couldn't write the game files to " + tmp.string());
     }
@@ -591,7 +591,9 @@ bool run(const Files& files) {
     fs::rename(tmp, "work/fs", ec);
     if (ec) return fail("couldn't move the files into work/fs: " + ec.message());
     fs::remove_all("work/fs.old", ec);
-    fs::rename(img, "work/vc3.img", ec);
+    // The decrypted disc image (~460 MiB) was only needed to unpack it: the game runs from work/fs.
+    fs::remove(img, ec);
+    fs::remove("work/vc3.img", ec);  // (left by older versions)
     set_status("Game files installed", 1.0f);
     g_progress.state = 2;
     return true;
