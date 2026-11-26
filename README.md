@@ -32,7 +32,7 @@ Command-line options and environment variables: [docs/OPTIONS.md](docs/OPTIONS.m
 - **Settings**: renderer (OpenGL / Vulkan), 3D resolution (Match display or 1x-8x), aspect
   ratio (4:3, 16:9, 16:10, 21:9) with the HUD at the screen edges, anisotropic filtering, SMAA,
   window size, windowed / fullscreen, crosshair and its size, Sinden lightgun border, vsync,
-  sound, free play, cheats (infinite ammo / lives / slow motion, start at the final stage, a
+  sound, free play, cheats (infinite ammo / lives / E.S. slow motion, start at the final stage, a
   starting weapon or all of them).
 - **Controls**: per player, the aim device (system mouse, a gamepad stick, one specific mouse or
   lightgun read on its own, a Wiimote's IR pointer) and the inputs for trigger, reload, pedal,

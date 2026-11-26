@@ -72,7 +72,7 @@ const std::vector<Option> kOptions = {
      {{"0", "Off"}, {"1", "On"}}, "0"},
     {"cheat_lives", "VC3_CHEAT_LIVES", "Cheats", "Infinite lives",
      "Getting hit doesn't cost a life.", {{"0", "Off"}, {"1", "On"}}, "0"},
-    {"cheat_slowmo", "VC3_CHEAT_SLOWMO", "Cheats", "Infinite slow motion",
+    {"cheat_slowmo", "VC3_CHEAT_SLOWMO", "Cheats", "Infinite E.S. slow motion",
      "The E.S. gauge (pedal slow motion) never runs down.", {{"0", "Off"}, {"1", "On"}}, "0"},
     {"cheat_final", "VC3_CHEAT_FINAL", "Cheats", "Start at the final stage",
      "Whichever mission is chosen, the final stage is played instead.", {{"0", "Off"}, {"1", "On"}}, "0"},

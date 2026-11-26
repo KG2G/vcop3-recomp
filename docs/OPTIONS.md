@@ -43,7 +43,7 @@ VC3_RENDERER=vulkan VC3_RES_SCALE=3 VC3_WIDESCREEN=16:9 ./vc3
 | `VC3_FREEPLAY` | Free play | `1`, `0` |
 | `VC3_CHEAT_AMMO` | Infinite ammo | `1`, `0` |
 | `VC3_CHEAT_LIVES` | Infinite lives | `1`, `0` |
-| `VC3_CHEAT_SLOWMO` | Infinite slow motion | `1`, `0` |
+| `VC3_CHEAT_SLOWMO` | Infinite E.S. slow motion | `1`, `0` |
 | `VC3_CHEAT_FINAL` | Start at the final stage | `1`, `0` |
 | `VC3_CHEAT_WEAPON` | Weapon | `0` none, `3` G36C, `4` MP7, `5` M4, `6` M629, `10` SAM-92A, `11` LMG249, `99` all weapons |
 
