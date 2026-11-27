@@ -2,11 +2,20 @@
 #pragma once
 #include <chrono>
 #include <filesystem>
+#include <string>
+#include <vector>
 
 namespace vc3::platform {
 
 // The running program's own file (Linux: /proc/self/exe; Windows: GetModuleFileName).
 std::filesystem::path exe_path();
+// The folder the player sees the program in (Linux AppImage: the .AppImage file's folder, not
+// its temporary mount).
+std::filesystem::path program_dir();
+// The default data folder, computed without creating it (SDL_GetPrefPath creates it, which would
+// leave an empty folder behind for installs that live elsewhere): Windows
+// %APPDATA%\vcop3-recomp\vcop3-recomp, Linux $XDG_DATA_HOME (~/.local/share)/vcop3-recomp/vcop3-recomp.
+std::filesystem::path user_data_dir();
 #ifdef _WIN32
 // Set an open file's size without writing the new part: marked sparse first (unwritten
 // parts take no space and read as zeros, like Linux), then the end moved.
@@ -29,15 +38,14 @@ void* make_event();
 void set_event(void* e);
 void wait_event(void* e, unsigned ms);
 #endif
+// The program's command line (main), and a restart of the program with it -- the launcher skipped,
+// VC3_TEST_MODE set or cleared -- the way the cabinet reboots into or out of its test menu.
+// Returns only if the restart failed.
+void set_args(int argc, char** argv);
+std::vector<std::string> args();
+void relaunch(bool test_mode);
 // setenv(name, value, overwrite=1) / unsetenv (Windows: _putenv_s).
 void set_env(const char* name, const char* value);
 void unset_env(const char* name);
-// Only one renderer can run here (Windows: Vulkan; the OpenGL renderer needs EGL).
-constexpr bool kVulkanOnly =
-#ifdef _WIN32
-    true;
-#else
-    false;
-#endif
 
 }  // namespace vc3::platform

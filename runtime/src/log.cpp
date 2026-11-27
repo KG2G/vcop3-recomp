@@ -150,6 +150,10 @@ double uptime() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - g_start).count();
 }
 
+#ifndef _WIN32
+Sink g_err{-1, -1}, g_out{-1, -1};  // console + log file behind stderr / stdout (start())
+#endif
+
 void start(const std::string& dir) {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -166,7 +170,10 @@ void start(const std::string& dir) {
 #else
     const int file = open(log.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
     if (file >= 0) {
-        static Sink err{dup(STDERR_FILENO), file}, out{dup(STDOUT_FILENO), file};
+        g_err = Sink{dup(STDERR_FILENO), file};
+        g_out = Sink{dup(STDOUT_FILENO), file};
+        Sink& err = g_err;
+        Sink& out = g_out;
         cookie_io_functions_t io{nullptr, sink_write, nullptr, nullptr};
         if (FILE* e = fopencookie(&err, "w", io)) {
             std::setvbuf(e, nullptr, _IONBF, 0);
@@ -181,8 +188,41 @@ void start(const std::string& dir) {
     for (int sig : {SIGABRT, SIGFPE, SIGILL}) std::signal(sig, on_signal);
 }
 
+void move_to(const std::string& dir) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (g_folder.empty() || dir.empty()) return;
+    const fs::path from = fs::path(g_folder), to = fs::absolute(dir, ec);
+    if (fs::equivalent(from, to, ec)) return;
+    fs::create_directories(to, ec);
+    std::fflush(stderr);
+    std::fflush(stdout);
+    fs::copy_file(from / "vc3.log", to / "vc3.log", fs::copy_options::overwrite_existing, ec);
+    if (ec) return;  // (keep writing where we are)
+    fs::copy_file(from / "vc3.prev.log", to / "vc3.prev.log", fs::copy_options::overwrite_existing, ec);
+    const std::string p = (to / "vc3.log").string();
+#ifdef _WIN32
+    if (std::freopen(p.c_str(), "a", stderr)) std::setvbuf(stderr, nullptr, _IONBF, 0);
+    if (FILE* o = std::freopen(p.c_str(), "a", stdout)) std::setvbuf(o, nullptr, _IONBF, 0);
+#else
+    const int file = open(p.c_str(), O_WRONLY | O_APPEND);
+    if (file < 0) return;
+    if (g_err.file >= 0) dup2(file, g_err.file);  // (stdout shares the same descriptor)
+    close(file);
+#endif
+    fs::remove(from / "vc3.log", ec);
+    fs::remove(from / "vc3.prev.log", ec);
+    g_folder = to.string();
+}
+
 void header() {
-    std::fprintf(stderr, "[log] vcop3-recomp %s, %s\n", VC3_VERSION, platform::kVulkanOnly ? "Windows build" : "Linux build");
+    std::fprintf(stderr, "[log] vcop3-recomp %s, %s\n", VC3_VERSION, 
+#ifdef _WIN32
+                 "Windows build"
+#else
+                 "Linux build"
+#endif
+                 );
     std::fprintf(stderr, "[log] system: %s\n", os_name().c_str());
     std::fprintf(stderr, "[log] CPU: %s, %u threads; RAM: %.0f GB\n", cpu_name().c_str(), std::thread::hardware_concurrency(),
                  double(SDL_GetSystemRAM()) / 1024.0);
@@ -191,7 +231,6 @@ void header() {
     for (const auto& o : settings::options()) {
         std::string v = settings::get(o.key);
         if (!std::strcmp(o.key, "install_dir")) v = v.empty() ? "default" : "custom";  // (no paths)
-        if (!std::strcmp(o.key, "renderer") && platform::kVulkanOnly) v = "vulkan";  // (the only one there)
         s += std::string(" ") + o.key + "=" + v;
     }
     std::fprintf(stderr, "[log] settings:%s\n", s.c_str());

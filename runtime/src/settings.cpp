@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <map>
 
@@ -14,9 +15,15 @@ namespace {
 std::map<std::string, std::string> g_values;
 
 const std::vector<Option> kOptions = {
+#ifdef _WIN32  // Windows: Vulkan by default (most dependable there); OpenGL works too
+    {"renderer", "VC3_RENDERER", "Graphics", "Renderer",
+     "Vulkan (default on Windows) or OpenGL 4.5. Try the other one if a game scene looks wrong or stutters.",
+     {{"opengl", "OpenGL"}, {"vulkan", "Vulkan"}}, "vulkan"},
+#else
     {"renderer", "VC3_RENDERER", "Graphics", "Renderer",
      "OpenGL works everywhere. Vulkan can be smoother; if it isn't available the game uses OpenGL.",
      {{"opengl", "OpenGL"}, {"vulkan", "Vulkan"}}, "opengl"},
+#endif
     {"res_scale", "VC3_RES_SCALE", "Graphics", "Resolution",
      "Internal 3D resolution as a multiple of the original 640x480. Match display picks the "
      "multiple closest to your screen's height (3x for 1440p, 2x for 1080p and the Steam Deck).",
@@ -70,6 +77,11 @@ const std::vector<Option> kOptions = {
      {{"1", "100%"}, {"0.9", "90%"}, {"0.8", "80%"}, {"0.7", "70%"}, {"0.6", "60%"}, {"0.5", "50%"},
       {"0.4", "40%"}, {"0.3", "30%"}, {"0.2", "20%"}, {"0.1", "10%"}},
      "1"},
+    {"check_updates", "VC3_CHECK_UPDATES", "Updates", "Check for updates",
+     "When the program starts, look on GitHub for a newer version. If there is one, its changes are shown "
+     "and you choose whether to update (only the program is replaced: the installed game, settings and "
+     "saves stay as they are).",
+     {{"1", "On"}, {"0", "Off"}}, "1"},
     {"freeplay", "VC3_FREEPLAY", "Game", "Free play",
      "Start and continue without coins (the game shows FREEPLAY instead of the credits).",
      {{"0", "Off (coins)"}, {"1", "On"}}, "0"},
@@ -133,16 +145,45 @@ const Option* find(const char* key) {
 
 const std::vector<Option>& options() { return kOptions; }
 
+// Where everything lives: the data folder is wherever settings.ini is. The default is the per-user
+// data folder. A folder of the player's own ("Install to") holds everything instead -- the game
+// files (work/), settings.ini and vc3.log -- so it is portable. At startup it is found:
+//   1. beside the program (installed into the program's own folder: the folder can be moved as is);
+//   2. through location.txt in the per-user folder (one line, the folder's path), for a folder
+//      anywhere else -- the only thing left in the per-user folder then;
+//   3. otherwise the per-user folder.
+namespace {
+namespace fs = std::filesystem;
+std::string g_file;  // the settings file in use (set by load())
+fs::path pointer_file() { return platform::user_data_dir() / "location.txt"; }
+fs::path default_file() { return platform::user_data_dir() / "settings.ini"; }
+bool same_dir(const fs::path& a, const fs::path& b) {
+    std::error_code ec;
+    return fs::equivalent(a, b, ec) && !ec;
+}
+std::string locate() {
+    std::error_code ec;
+    const fs::path beside = platform::program_dir() / "settings.ini";
+    if (fs::exists(beside, ec)) return beside.string();
+    if (std::ifstream pf{pointer_file()}) {
+        std::string dir;
+        std::getline(pf, dir);
+        dir = trim(dir);
+        if (!dir.empty() && fs::exists(fs::path(dir) / "settings.ini", ec)) return (fs::path(dir) / "settings.ini").string();
+    }
+    return default_file().string();
+}
+}  // namespace
+
 std::string file_path() {
-    char* dir = SDL_GetPrefPath("vcop3-recomp", "vcop3-recomp");
-    std::string p = dir ? std::string(dir) + "settings.ini" : "work/settings.ini";
-    SDL_free(dir);
-    return p;
+    if (g_file.empty()) g_file = locate();
+    return g_file;
 }
 
 void load() {
     for (const auto& o : kOptions) g_values[o.key] = o.def;
-    std::ifstream f(file_path());
+    g_file = locate();
+    std::ifstream f(g_file);
     std::string line;
     while (std::getline(f, line)) {
         line = trim(line);
@@ -156,6 +197,46 @@ void load() {
         for (const auto& c : o->choices)  // only values the option offers
             if (v == c.value) g_values[k] = v;
     }
+    f.close();
+    if (!same_dir(fs::path(g_file).parent_path(), platform::user_data_dir())) {
+        // A folder of the player's own: it is where settings.ini is (also after the folder was moved).
+        g_values["install_dir"] = fs::path(g_file).parent_path().string();
+    } else if (!g_values["install_dir"].empty()) {
+        // Settings from before (v0.1.6 and older) with an install folder chosen: everything moves there.
+        relocate(g_values["install_dir"]);
+    }
+}
+
+void tidy_default_folder() {
+    std::error_code ec;
+    fs::remove(platform::user_data_dir(), ec);  // (only if empty)
+    fs::remove(platform::user_data_dir().parent_path(), ec);
+}
+
+bool relocate(const std::string& dir_in) {
+    std::error_code ec;
+    const std::string old_file = file_path();
+    const std::string old_dir_setting = g_values["install_dir"];
+    fs::path dir = dir_in.empty() ? platform::user_data_dir() : fs::absolute(fs::path(dir_in), ec);
+    const bool custom = !dir_in.empty() && !same_dir(dir, platform::user_data_dir());
+    fs::create_directories(dir, ec);
+    g_file = (dir / "settings.ini").string();
+    g_values["install_dir"] = custom ? dir.string() : "";
+    if (!save()) {  // (a folder that can't be written: stay where we were)
+        g_file = old_file;
+        g_values["install_dir"] = old_dir_setting;
+        return false;
+    }
+    // The pointer in the per-user folder: only for a folder of the player's own that isn't the
+    // program's folder (that one is found by itself).
+    if (custom && !same_dir(dir, platform::program_dir())) {
+        fs::create_directories(platform::user_data_dir(), ec);
+        std::ofstream(pointer_file()) << dir.string() << "\n";
+    } else {
+        fs::remove(pointer_file(), ec);
+    }
+    if (old_file != g_file) fs::remove(old_file, ec);  // the old settings file (game files stay where they are)
+    return true;
 }
 
 bool save() {

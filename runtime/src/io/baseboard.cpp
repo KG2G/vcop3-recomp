@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -41,6 +42,50 @@ void load_eeproms() {
         std::fclose(fp);
         for (size_t i = 0; i + 1 < n; i += 2) std::swap(g_region[f.off + i], g_region[f.off + i + 1]);  // ROM_LOAD16_WORD_SWAP
     }
+}
+
+// ---- Battery-backed storage the game writes: the AN2131QC's external memory (a 128 KiB SRAM on the
+// base board; the game keeps its test-menu settings and bookkeeping there -- 0x2DC bytes at 0x8400) and
+// the EEPROMs. Without these the cabinet "forgets" every test-menu change at the next start. Kept in the
+// data folder (work/hdd, next to the hard-disk images), opened on the game's first request: the
+// launcher can still switch folders after init().
+constexpr size_t kSramSize = 0x20000;
+std::vector<uint8_t> g_sram(kSramSize, 0);
+bool g_backup_ready = false;
+const char* const kSramFile = "work/hdd/baseboard_sram.bin";
+const char* const kEepromFile = "work/hdd/baseboard_eeprom.bin";  // g_region as the game last wrote it
+
+void ensure_backup() {
+    if (g_backup_ready) return;
+    g_backup_ready = true;
+    std::error_code ec;
+    std::filesystem::create_directories("work/hdd", ec);
+    if (std::FILE* f = std::fopen(kSramFile, "rb")) {
+        if (std::fread(g_sram.data(), 1, g_sram.size(), f)) {}
+        std::fclose(f);
+    }
+    if (std::FILE* f = std::fopen(kEepromFile, "rb")) {
+        std::vector<uint8_t> v(g_region.size());
+        if (std::fread(v.data(), 1, v.size(), f) == v.size()) g_region = v;
+        std::fclose(f);
+    }
+}
+
+void save_file(const char* path, const std::vector<uint8_t>& data) {
+    // Whole file each time (writes are rare: leaving the test menu, bookkeeping), via a temporary
+    // file so a crash mid-write can't leave a half-written backup.
+    const std::string tmp = std::string(path) + ".tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) { std::fprintf(stderr, "[baseboard] can't write %s\n", tmp.c_str()); return; }
+    const bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
+    if (std::fclose(f) != 0 || !ok) { std::fprintf(stderr, "[baseboard] can't write %s\n", tmp.c_str()); return; }
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {  // some Windows file systems won't replace an existing file by rename
+        std::filesystem::remove(path, ec);
+        std::filesystem::rename(tmp, path, ec);
+    }
+    if (ec) std::fprintf(stderr, "[baseboard] can't replace %s: %s\n", path, ec.message().c_str());
 }
 
 // ------------------------------------------------------------------ JVS I/O board
@@ -235,7 +280,20 @@ protected:
         switch (s.bRequest) {
             case 0x16: set_in(1, g_region.data() + s.wValue, s.wIndex & 0xFF); break;          // read EEPROM 1 via EP1
             case 0x17: set_in(2, g_region.data() + 0x2000 + s.wValue, s.wIndex & 0xFF); break;  // read EEPROM 2 via EP2
-            case 0x18: case 0x1C: case 0x1D: case 0x1E: case 0x1F: case 0x24: break;
+            case 0x18:  // read external memory (SRAM) via EP3: address wValue, wIndex bytes
+                ensure_backup();
+                set_in(3, g_sram.data() + std::min<size_t>(s.wValue, kSramSize),
+                       std::min<size_t>(s.wIndex, kSramSize - std::min<size_t>(s.wValue, kSramSize)));
+                break;
+            case 0x1D:  // write EEPROM 1 / EEPROM 2 / external memory: the data follows on EP1 / EP2 / EP3 OUT
+            case 0x1E:
+            case 0x1F: {
+                ensure_backup();
+                const int ep = s.bRequest - 0x1C;
+                out_[ep] = {s.wValue, s.wIndex, {}};
+                break;
+            }
+            case 0x1C: case 0x24: break;  // RTC
             case 0x19:  // fetch JVS replies prepared by 0x20, via EP4
                 put(4, uint8_t(jvs_out_.size()));
                 put(5, uint8_t(jvs_out_.size() >> 8));
@@ -274,11 +332,36 @@ protected:
             if (n > 0 && jvs_in_.size() == jvs_in_expected_) process_jvs();
             return n;
         }
+        if (pid == usb::Pid::Out && ep >= 1 && ep <= 3) {
+            auto& w = out_[ep];
+            const int n = std::min<int>(len, int(w.expected - w.data.size()));
+            if (n <= 0) return len;
+            w.data.insert(w.data.end(), buf, buf + n);
+            if (w.data.size() == w.expected) finish_write(ep);
+            return n;
+        }
         return len;  // other OUT endpoints: accept and ignore
     }
 
 private:
     Endpoint ep_[6];
+    struct PendingWrite { size_t addr = 0, expected = 0; std::vector<uint8_t> data; };
+    PendingWrite out_[4];  // EP1 EEPROM 1, EP2 EEPROM 2, EP3 external memory
+
+    void finish_write(int ep) {
+        auto& w = out_[ep];
+        std::lock_guard lk(g_jvs_m);
+        if (trace()) std::fprintf(stderr, "[an2131qc] write %zu bytes at %#zx (EP%d)\n", w.data.size(), w.addr, ep);
+        if (ep == 3) {
+            for (size_t i = 0; i < w.data.size() && w.addr + i < kSramSize; ++i) g_sram[w.addr + i] = w.data[i];
+            save_file(kSramFile, g_sram);
+        } else {
+            const size_t base = ep == 1 ? 0x0000 : 0x2000, size = ep == 1 ? 0x2000 : 0x80;
+            for (size_t i = 0; i < w.data.size() && w.addr + i < size; ++i) g_region[base + w.addr + i] = w.data[i];
+            save_file(kEepromFile, g_region);
+        }
+        w = {};
+    }
     std::vector<uint8_t> jvs_in_, jvs_out_;
     size_t jvs_in_expected_ = 0;
 

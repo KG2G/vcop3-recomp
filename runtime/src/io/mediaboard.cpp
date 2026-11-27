@@ -54,6 +54,8 @@ void run_command() {
 long mbcom_read(uint64_t off, uint8_t* buf, uint32_t len) {
     std::lock_guard lk(g_m);
     std::memset(buf, 0, len);
+    static const bool trd = std::getenv("VC3_TRACE_MBCOM") != nullptr;
+    if (trd && off / 512 != kReplySector) std::fprintf(stderr, "[mbcom] read lba %#llx len %u\n", (unsigned long long)(off / 512), len);
     for (uint32_t i = 0; i < len; i += 512) {
         const uint64_t lba = (off + i) / 512;
         if (lba == kReplySector) std::memcpy(buf + i, g_cmd_reply, std::min<uint32_t>(0x20, len - i));
@@ -65,6 +67,8 @@ long mbcom_read(uint64_t off, uint8_t* buf, uint32_t len) {
 long mbcom_write(uint64_t off, uint8_t* buf, uint32_t len) {
     std::lock_guard lk(g_m);
     static const bool tr = std::getenv("VC3_TRACE_USB") != nullptr;
+    static const bool trd = std::getenv("VC3_TRACE_MBCOM") != nullptr;
+    if (trd && off / 512 != kCommandSector) std::fprintf(stderr, "[mbcom] write lba %#llx len %u\n", (unsigned long long)(off / 512), len);
     for (uint32_t i = 0; i < len; i += 512) {
         const uint64_t lba = (off + i) / 512;
         if (lba == kReplySector) std::memcpy(g_cmd_reply, buf + i, std::min<uint32_t>(0x20, len - i));

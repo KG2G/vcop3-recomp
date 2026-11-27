@@ -1,7 +1,14 @@
 #include "platform.h"
 
 #include <cstdlib>
+
+#include <cstdio>
 #include <thread>
+#include <vector>
+#include <string>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #ifdef _WIN32
 #include <io.h>
@@ -21,6 +28,25 @@ std::filesystem::path exe_path() {
     std::error_code ec;
     return std::filesystem::read_symlink("/proc/self/exe", ec);
 #endif
+}
+
+std::filesystem::path program_dir() {
+    if (const char* ai = std::getenv("APPIMAGE"); ai && *ai) return std::filesystem::path(ai).parent_path();
+    const std::filesystem::path p = exe_path();
+    return p.empty() ? std::filesystem::current_path() : p.parent_path();
+}
+
+std::filesystem::path user_data_dir() {
+#ifdef _WIN32
+    const char* base = std::getenv("APPDATA");
+    const std::filesystem::path root = base && *base ? std::filesystem::path(base) : std::filesystem::current_path();
+#else
+    std::filesystem::path root;
+    if (const char* x = std::getenv("XDG_DATA_HOME"); x && *x) root = x;
+    else if (const char* h = std::getenv("HOME"); h && *h) root = std::filesystem::path(h) / ".local" / "share";
+    else root = std::filesystem::current_path();
+#endif
+    return root / "vcop3-recomp" / "vcop3-recomp";
 }
 
 #ifdef _WIN32
@@ -82,6 +108,46 @@ void wait_event(void* e, unsigned ms) { WaitForSingleObject(static_cast<HANDLE>(
 void init_process() {
 #ifdef _WIN32
     timeBeginPeriod(1);  // for the life of the process (Windows restores it on exit)
+#endif
+}
+
+std::vector<std::string> g_args;
+void set_args(int argc, char** argv) { g_args.assign(argv, argv + argc); }
+std::vector<std::string> args() { return g_args; }
+
+void relaunch(bool test_mode) {
+    if (test_mode) set_env("VC3_TEST_MODE", "1");
+    else unset_env("VC3_TEST_MODE");
+    std::vector<std::string> args;
+    for (size_t i = 0; i < g_args.size(); ++i)
+        if (!i || (g_args[i] != "--launcher" && g_args[i] != "--no-launcher")) args.push_back(g_args[i]);
+    if (args.empty()) args.push_back("vc3");
+    args.push_back("--no-launcher");  // straight back into the game
+    std::fflush(stderr);
+    std::fflush(stdout);
+#ifdef _WIN32
+    std::wstring cmd;
+    for (const std::string& a : args) {
+        const int n = MultiByteToWideChar(CP_UTF8, 0, a.c_str(), -1, nullptr, 0);
+        std::wstring w(n > 0 ? size_t(n - 1) : 0, L'\0');
+        if (n > 1) MultiByteToWideChar(CP_UTF8, 0, a.c_str(), -1, w.data(), n);
+        if (!cmd.empty()) cmd += L' ';
+        cmd += L'"' + w + L'"';
+    }
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    const std::wstring exe = exe_path().wstring();
+    if (CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        std::_Exit(0);
+    }
+#else
+    std::vector<char*> argv;
+    for (std::string& a : args) argv.push_back(a.data());
+    argv.push_back(nullptr);
+    execv(exe_path().c_str(), argv.data());  // (inside an AppImage: its mounted binary, still mounted)
 #endif
 }
 

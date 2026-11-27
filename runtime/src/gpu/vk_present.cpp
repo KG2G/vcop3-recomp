@@ -216,6 +216,12 @@ bool build_swapchain() {
     VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     ci.surface = c.surface;
     ci.minImageCount = std::max(caps.minImageCount, 3u);
+#ifdef _WIN32
+    // Windows, vsync (FIFO): two images, so at most one finished frame waits for the display.
+    // With three, the driver queued two frames ahead (presents go through the desktop compositor
+    // there): about two refreshes of extra aim lag and an uneven present rhythm (choppy).
+    if (g_mode == VK_PRESENT_MODE_FIFO_KHR) ci.minImageCount = std::max(caps.minImageCount, 2u);
+#endif
     if (caps.maxImageCount) ci.minImageCount = std::min(ci.minImageCount, caps.maxImageCount);
     ci.imageFormat = fmt.format;
     ci.imageColorSpace = fmt.colorSpace;

@@ -10,7 +10,8 @@ namespace vc3::gpu::dev {
 
 namespace gl {
 // Windowed mode: the window's EGL display/config/context, set before create_context().
-// The GPU thread's context then shares objects with the window's.
+// The GPU thread's context then shares objects with the window's. (Windows: a hidden window
+// and the WGL context already made for the GPU thread, sharing with the window's; config unused.)
 void set_share(void* egl_display, void* egl_config, void* egl_context);
 bool shared();
 // Creates an EGL context current on the calling thread (shared with the window's if set).

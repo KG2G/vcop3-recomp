@@ -189,6 +189,8 @@ std::vector<ScriptEvent> load_script() {
 }
 }  // namespace
 
+void note_test(bool down);  // (below: remembers when TEST went down)
+
 void script_tick(uint64_t vblank) {
     static std::vector<ScriptEvent> events = load_script();
     if (events.empty()) return;
@@ -223,7 +225,7 @@ void script_tick(uint64_t vblank) {
         }
         else if (a.rfind("pedal", 0) == 0) g.pedal = down;
         else if (a.rfind("change", 0) == 0) g.change = down;
-        else if (a == "test") g_state.test = down;
+        else if (a == "test") note_test(down), g_state.test = down;
         else if (a == "service") g_state.service = down;
         std::fprintf(stderr, "[input] vblank %llu: %s %s\n", (unsigned long long)vblank, a.c_str(),
                      a.rfind("aim", 0) == 0 ? "" : (down ? "down" : "up"));
@@ -246,8 +248,19 @@ void set_button(int p, Button b, int presses, bool down, long long press_event_n
         if (!g_press_waiting.time_since_epoch().count()) g_press_waiting = StatClock::now() - age;
     }
 }
+std::atomic<long long> g_test_press_ns{0};  // when TEST last went down (steady clock)
+void note_test(bool down) {
+    if (down && !g_state.test)
+        g_test_press_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+bool test_pressed_within(double seconds) {
+    const long long t = g_test_press_ns.load();
+    const long long now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    return t && double(now - t) / 1e9 < seconds;
+}
 void set_test_service(bool test, bool service) {
     std::lock_guard lk(g_m);
+    note_test(test);
     g_state.test = test;
     g_state.service = service;
 }

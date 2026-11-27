@@ -42,6 +42,8 @@ enum Button { kTrigger, kPedal, kChange, kStart, kCoin };
 void set_button(int p, Button b, int presses, bool down, long long press_event_ns = 0, long long now_ns = 0);
 std::string timing_report();  // input timing since the last call, for the log
 void set_test_service(bool test, bool service);
+// TEST went down within the last `seconds` (the game reboots for its test menu after TEST).
+bool test_pressed_within(double seconds);
 bool scripted();  // an input script is running: live input stays off
 
 }  // namespace vc3::io

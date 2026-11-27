@@ -430,12 +430,7 @@ bool fail(const std::string& m) {
 
 std::string data_root() { return fs::current_path().string(); }  // main() picks it (work/ lives here)
 
-fs::path exe_dir() {
-    if (const char* ai = std::getenv("APPIMAGE")) return fs::path(ai).parent_path();  // beside the .AppImage
-    std::error_code ec;
-    const fs::path p = platform::exe_path();
-    return ec ? fs::current_path() : p.parent_path();
-}
+fs::path exe_dir() { return platform::program_dir(); }  // (beside the .AppImage on Linux)
 
 }  // namespace
 
@@ -456,12 +451,7 @@ std::string g_default_loc;
 void set_default_location(const std::string& dir) { g_default_loc = dir; }
 std::string default_location() {
     if (!g_default_loc.empty()) return g_default_loc;
-    std::string out = data_root();
-    if (char* pref = SDL_GetPrefPath("vcop3-recomp", "vcop3-recomp")) {
-        out = pref;
-        SDL_free(pref);
-    }
-    return out;
+    return platform::user_data_dir().string();
 }
 std::string location();
 bool use_location(const std::string& dir) {

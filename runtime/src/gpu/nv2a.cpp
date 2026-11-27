@@ -774,7 +774,6 @@ void on_refresh(Clock::time_point now) {
 
 bool wants_vulkan_window() {
 #ifdef VC3_HAVE_VULKAN
-    if (platform::kVulkanOnly) return true;
     const char* r = std::getenv("VC3_RENDERER");
     return r && !std::strcmp(r, "vulkan");
 #else
@@ -809,8 +808,23 @@ bool init(SDL_Window* window) {
     std::fprintf(stderr, "[present] OpenGL %s on %s, vsync %s\n", reinterpret_cast<const char*>(glGetString(GL_RENDERER)),
                  SDL_GetCurrentVideoDriver(), g_vsync ? "on" : "off");
     // Let the GPU thread share this context's objects (it creates its context later).
+#ifdef _WIN32
+    // WGL: the GPU thread's context is made here, sharing with this one, on a small hidden window
+    // of its own (a WGL context needs a window to be current on); the GPU thread takes it over.
+    {
+        SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
+        SDL_Window* hidden = SDL_CreateWindow("vc3 renderer", 16, 16, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+        SDL_GLContext gpu = hidden ? SDL_GL_CreateContext(hidden) : nullptr;
+        SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
+        if (gpu) SDL_GL_MakeCurrent(hidden, nullptr);
+        SDL_GL_MakeCurrent(window, g_glctx);
+        if (gpu) pgraph::glb::set_share(hidden, nullptr, gpu);
+        else std::fprintf(stderr, "[gl] renderer context: %s\n", SDL_GetError());
+    }
+#else
     if (std::getenv("VC3_NO_SHARE") == nullptr)
         pgraph::glb::set_share(SDL_EGL_GetCurrentDisplay(), SDL_EGL_GetCurrentConfig(), g_glctx);
+#endif
     update_display_mode();
     return true;
 }

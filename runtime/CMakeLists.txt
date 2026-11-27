@@ -20,6 +20,7 @@ add_library(vc3_runtime STATIC
   src/memory.cpp
   src/settings.cpp
   src/launcher.cpp
+  src/updater.cpp
   src/install.cpp
   src/dispatch.cpp
   src/loader.cpp
@@ -110,7 +111,7 @@ if(WIN32)
   # in, so the .exe needs only SDL3.dll and the system's Vulkan loader.
   target_link_options(vc3 PRIVATE -mwindows -Wl,--stack,67108864 -static-libgcc -static-libstdc++
                       -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic)
-  target_link_libraries(vc3 PRIVATE winmm hid)  # timeBeginPeriod; HidD_GetProductString (device names)
+  target_link_libraries(vc3 PRIVATE winmm hid winhttp)  # timeBeginPeriod; HidD_GetProductString (device names)
 else()
   target_link_options(vc3 PRIVATE -rdynamic)  # lets crash reports name the lifted function (dladdr)
 endif()

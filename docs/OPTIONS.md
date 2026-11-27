@@ -41,6 +41,7 @@ VC3_RENDERER=vulkan VC3_RES_SCALE=3 VC3_WIDESCREEN=16:9 ./vc3
 | `VC3_VSYNC` | Vertical sync | `1`, `0` |
 | `VC3_AUDIO` | Sound | `1`, `0` |
 | `VC3_VOLUME` | Volume | `1` (100%) down to `0.1` (10%) in the launcher; any factor works (e.g. `0.25`) |
+| `VC3_CHECK_UPDATES` | Check for updates | `1`, `0` |
 | `VC3_FREEPLAY` | Free play | `1`, `0` |
 | `VC3_CHEAT_AMMO` | Infinite ammo | `1`, `0` |
 | `VC3_CHEAT_LIVES` | Infinite lives | `1`, `0` |

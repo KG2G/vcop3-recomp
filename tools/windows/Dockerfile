@@ -19,9 +19,10 @@ RUN cmake -S /tmp/sdl -B /tmp/sdl/b -G Ninja -DCMAKE_TOOLCHAIN_FILE=/opt/toolcha
 # Khronos EGL headers (libepoxy's EGL part needs them; MinGW has none)
 RUN git clone --depth 1 https://github.com/KhronosGroup/EGL-Registry.git /tmp/egl && \
     mkdir -p $PREFIX/include && cp -r /tmp/egl/api/EGL /tmp/egl/api/KHR $PREFIX/include/ && rm -rf /tmp/egl
-# libepoxy (OpenGL function loader; the code is shared with the Linux build)
+# libepoxy (OpenGL function loader; the code is shared with the Linux build). Without EGL: on Windows
+# the renderer uses WGL, and an EGL-enabled libepoxy looks for libEGL.dll before every lookup.
 RUN CFLAGS="-I$PREFIX/include" git clone --depth 1 --branch 1.5.10 https://github.com/anholt/libepoxy.git /tmp/epoxy && \
-    cd /tmp/epoxy && CFLAGS="-I$PREFIX/include" meson setup b --cross-file /opt/meson-cross.txt --prefix=$PREFIX -Dtests=false -Degl=yes -Dglx=no -Dx11=false -Ddefault_library=static && \
+    cd /tmp/epoxy && CFLAGS="-I$PREFIX/include" meson setup b --cross-file /opt/meson-cross.txt --prefix=$PREFIX -Dtests=false -Degl=no -Dglx=no -Dx11=false -Ddefault_library=static && \
     ninja -C b install && rm -rf /tmp/epoxy
 # Vulkan headers + loader
 RUN git clone --depth 1 --branch v1.4.309 https://github.com/KhronosGroup/Vulkan-Headers.git /tmp/vkh && \

@@ -5,7 +5,11 @@
 #include "gpu/gl_device.h"
 #include "gpu/pipe_recipe.h"
 
+#ifdef _WIN32
+#include <SDL3/SDL.h>  // WGL contexts through SDL
+#else
 #include <epoxy/egl.h>
+#endif
 #include <epoxy/gl.h>
 
 #include <algorithm>
@@ -26,6 +30,14 @@ namespace vc3::gpu::dev {
 namespace {
 
 // ================================================================ context
+#ifdef _WIN32
+// Windows: the window side makes the GPU thread's WGL context (shared with the window's, on a
+// hidden window of its own) and hands both over through set_share; create_context makes it
+// current here.
+SDL_Window* g_wgl_window = nullptr;
+SDL_GLContext g_wgl_ctx = nullptr;
+bool g_shared = false;
+#else
 bool make_context(EGLDisplay dpy) {
     if (dpy == EGL_NO_DISPLAY) return false;
     EGLint major, minor;
@@ -69,6 +81,7 @@ bool make_shared_context() {
     g_shared = true;
     return true;
 }
+#endif  // _WIN32
 
 // ================================================================ program cache
 // Programs are found by a hash of their GLSL source. Linked programs are saved as
@@ -981,6 +994,25 @@ void forget(const std::string& vs, const std::string& fs) {
 
 // ================================================================ entry points
 namespace gl {
+#ifdef _WIN32
+void set_share(void* window, void*, void* ctx) {
+    g_wgl_window = static_cast<SDL_Window*>(window);
+    g_wgl_ctx = static_cast<SDL_GLContext>(ctx);
+}
+bool shared() { return g_shared; }
+bool create_context() {
+    if (!g_wgl_window || !g_wgl_ctx) {
+        std::fprintf(stderr, "[gl] no OpenGL context from the window (Windows needs one: not in headless mode)\n");
+        return false;
+    }
+    if (!SDL_GL_MakeCurrent(g_wgl_window, g_wgl_ctx)) {
+        std::fprintf(stderr, "[gl] renderer context: %s\n", SDL_GetError());
+        return false;
+    }
+    g_shared = true;
+    return true;
+}
+#else
 void set_share(void* dpy, void* cfg, void* ctx) {
     g_share_dpy = static_cast<EGLDisplay>(dpy);
     g_share_cfg = static_cast<EGLConfig>(cfg);
@@ -1011,6 +1043,7 @@ bool create_context() {
     std::fprintf(stderr, "[gl] surfaceless EGL: no context (EGL error %#x)\n", unsigned(eglGetError()));
     return false;
 }
+#endif  // _WIN32
 }  // namespace gl
 
 float anisotropy_setting() {

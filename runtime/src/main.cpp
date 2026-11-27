@@ -35,6 +35,7 @@
 #include "kernel/kernel.h"
 #include "kernel/ps.h"
 #include "install.h"
+#include "updater.h"
 #include "log.h"
 #include "privacy.h"
 #include "launcher.h"
@@ -81,6 +82,8 @@ void capture() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    platform::set_args(argc, argv);
+    updater::cleanup();  // (what an earlier update left behind)
     std::setvbuf(stdout, nullptr, _IOLBF, 0);  // keep logs when the guest aborts
     platform::init_process();
     std::string xbe_path = "work/fs/vc3.xbe";
@@ -119,18 +122,8 @@ int main(int argc, char** argv) {
         if (!found) install::use_location(install::default_location());
     }
     if (no_settings || settings::get("install_dir").empty()) install::set_default_location(std::filesystem::current_path().string());
-    // The log: in the per-user data folder when the game is installed elsewhere (one place
-    // to find it), else beside the game (the data folder too, by default; tests and source
-    // checkouts keep theirs in place).
-    if (!getenv("VC3_NO_LOG")) {
-        std::string dir = std::filesystem::current_path().string();
-        if (!no_settings && !settings::get("install_dir").empty())
-            if (char* pref = SDL_GetPrefPath("vcop3-recomp", "vcop3-recomp")) {
-                dir = pref;
-                SDL_free(pref);
-            }
-        log::start(dir);
-    }
+    // The log: in the data folder, with everything else (a player's own install folder is portable).
+    if (!getenv("VC3_NO_LOG")) log::start(std::filesystem::current_path().string());
     if (!install_pic.empty()) return install::run({install_pic, install_chd}) ? 0 : 1;
 
     if (vc3_func_table_size == 0) {
@@ -153,8 +146,11 @@ int main(int argc, char** argv) {
     // mode; let them end the process directly (shutdown is an exit anyway).
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
     profiler::init();
+#ifndef _WIN32
     // The GL renderer shares an EGL context with the window: before SDL's video starts.
-    if (!platform::kVulkanOnly) SDL_SetHint(SDL_HINT_VIDEO_FORCE_EGL, "1");
+    // (Windows: WGL contexts through SDL, see gpu::init.)
+    SDL_SetHint(SDL_HINT_VIDEO_FORCE_EGL, "1");
+#endif
     // Settings, and the launcher to change them (before anything reads the options).
     if (!no_settings) {
         const bool show = !headless && !no_launcher &&
@@ -172,6 +168,8 @@ int main(int argc, char** argv) {
             if (!settings::get("install_dir").empty()) install::use_location(settings::get("install_dir"));
         }
         settings::apply();
+        // Launcher skipped: still look for an update (the window title tells about one).
+        if (!headless && settings::get("check_updates") != "0") updater::start_check();
     }
     if (!install::installed()) {
         std::string why;
@@ -317,6 +315,14 @@ int main(int argc, char** argv) {
             } else if (shown && (total == 0 || done >= total)) {
                 shown = false;
                 SDL_SetWindowTitle(win, "Virtua Cop 3 (recomp)");
+            }
+            // A newer version was found (launcher skipped): say so in the title, once.
+            static bool update_noted = false;
+            if (!update_noted && !shown && updater::state() == updater::State::kAvailable) {
+                update_noted = true;
+                const std::string t = "Virtua Cop 3 (recomp) - version " + updater::latest_version() +
+                                      " is available: start with the launcher to update";
+                SDL_SetWindowTitle(win, t.c_str());
             }
         }
         // A present blocks for the display refresh (vsync); with no new frame, poll again shortly.

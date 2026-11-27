@@ -16,6 +16,7 @@
 #include <string>
 
 #include "install.h"
+#include "updater.h"
 #include "io/input.h"
 #include "settings.h"
 
@@ -248,6 +249,16 @@ bool g_press_main = false;  // (testing: VC3_LAUNCHER_AUTOINSTALL presses the ma
 // players can set things up before the first start (the install doesn't start the game).
 bool g_just_installed = false, g_show_settings = false;
 bool g_files_init = false;
+bool g_location_failed = false;  // the chosen install folder couldn't be written
+
+// Make `dir` the data folder ("" = default): settings.ini, the game folder and the log go there.
+void apply_location(const std::string& dir) {
+    g_location_failed = !settings::relocate(dir);
+    install::use_location(install::location());
+    if (g_location_failed) return;
+    log::move_to(install::location());
+    settings::tidy_default_folder();
+}
 
 void SDLCALL on_pick(void* which, const char* const* list, int) {
     if (!list || !list[0]) return;
@@ -265,8 +276,7 @@ void game_files_page(SDL_Window* win, float label_w) {
         if (!g_picked[0].empty()) g_files.pic = std::move(g_picked[0]), g_picked[0].clear();
         if (!g_picked[1].empty()) g_files.chd = std::move(g_picked[1]), g_picked[1].clear();
         if (!g_picked[2].empty()) {
-            settings::set("install_dir", g_picked[2]);
-            install::use_location(install::location());
+            apply_location(g_picked[2]);  // everything goes there (portable)
             g_picked[2].clear();
         }
     }
@@ -316,22 +326,33 @@ void game_files_page(SDL_Window* win, float label_w) {
         const float bw = ImGui::CalcTextSize("Browse...").x + ImGui::GetStyle().FramePadding.x * 2;
         const float dw = ImGui::CalcTextSize("Default").x + ImGui::GetStyle().FramePadding.x * 2;
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - bw - dw - 2 * ImGui::GetStyle().ItemSpacing.x);
-        char buf[1024];
-        std::snprintf(buf, sizeof buf, "%s", install::location().c_str());
-        if (ImGui::InputText("##loc", buf, sizeof buf, ImGuiInputTextFlags_EnterReturnsTrue)) {
-            settings::set("install_dir", buf);
-            install::use_location(install::location());
+        // A typed folder applies when the field is left (Enter, Tab or a click elsewhere); while it
+        // is being edited it isn't refreshed from the setting (it used to snap back unless Enter was
+        // pressed).
+        static char buf[1024];
+        static bool editing = false;
+        if (!editing) std::snprintf(buf, sizeof buf, "%s", install::location().c_str());
+        ImGui::BeginDisabled(pr.state == 1);
+        ImGui::InputText("##loc", buf, sizeof buf);
+        ImGui::EndDisabled();
+        editing = ImGui::IsItemActive();
+        if (ImGui::IsItemDeactivatedAfterEdit() && std::string(buf) != install::location()) {
+            apply_location(buf);  // everything goes there (portable)
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-            ImGui::SetTooltip("Where the game files (about 500 MB), save data and shader caches go.");
+            ImGui::SetTooltip("Where everything goes: the game files (about 500 MB, with saves and shader caches),\n"
+                              "settings.ini and vc3.log. A folder of your own keeps it all together (portable);\n"
+                              "Default is the per-user data folder. After changing it, press INSTALL (or move the\n"
+                              "work folder over).");
         ImGui::SameLine();
         if (ImGui::Button("Browse...##loc", ImVec2(bw, 0)) && pr.state != 1)
             SDL_ShowOpenFolderDialog(on_pick, reinterpret_cast<void*>(intptr_t(2)), win, install::location().c_str(), false);
         ImGui::SameLine();
         if (ImGui::Button("Default", ImVec2(dw, 0)) && pr.state != 1) {
-            settings::set("install_dir", "");
-            install::use_location(install::location());
+            apply_location("");
         }
+        if (g_location_failed)
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Can't write to that folder: pick one you can write to.");
     }
     ImGui::Spacing();
     // Installing starts from the INSTALL button below; here only a reinstall.
@@ -364,6 +385,79 @@ void game_files_page(SDL_Window* win, float label_w) {
 
 }  // namespace
 
+// ---------------------------------------------------------------- updates
+// A newer version on GitHub (updater.h): its changes, then the choice to update. Only the program
+// file is replaced; the installed game, settings and saves stay.
+bool g_update_dismissed = false, g_update_opened = false;
+void update_window() {
+    using updater::State;
+    const State s = updater::state();
+    const bool offer = s == State::kAvailable || s == State::kDownloading || s == State::kInstalled || s == State::kInstallFailed;
+    if (offer && !g_update_dismissed && !g_update_opened) {
+        ImGui::OpenPopup("Update available");
+        g_update_opened = true;
+    }
+    const ImVec2 disp = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowSize(ImVec2(disp.x * 0.86f, disp.y * 0.8f), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("Update available", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) return;
+    const std::string latest = updater::latest_version();
+    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "Version %s is available (you have %s).", latest.c_str(),
+                       updater::current_version().c_str());
+    ImGui::TextDisabled("What's new:");
+    const float buttons = ImGui::GetFrameHeightWithSpacing() * 2 + ImGui::GetTextLineHeightWithSpacing();
+    ImGui::BeginChild("changelog", ImVec2(0, -buttons), ImGuiChildFlags_Borders);
+    ImGui::TextWrapped("%s", updater::changelog().c_str());
+    ImGui::EndChild();
+    const float bw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2;
+    auto later = [&] {
+        if (ImGui::Button("Not now", ImVec2(bw, 0))) {
+            g_update_dismissed = true;
+            ImGui::CloseCurrentPopup();
+        }
+    };
+    auto page = [&] {
+        if (ImGui::Button("Open the download page", ImVec2(bw, 0))) SDL_OpenURL(updater::releases_page().c_str());
+    };
+    switch (s) {
+        case State::kAvailable:
+            if (std::getenv("VC3_LAUNCHER_AUTOUPDATE") && updater::can_install()) updater::start_install();  // (testing)
+            if (updater::can_install()) {
+                ImGui::TextUnformatted("Only the program is replaced: the installed game, settings and saves stay.");
+                if (ImGui::Button("Update now", ImVec2(bw, 0))) {
+                    settings::save();
+                    updater::start_install();
+                }
+            } else {
+                ImGui::TextWrapped("This copy can't update itself (its folder can't be written, or it isn't a release "
+                                   "build): download the new version from the release page.");
+                page();
+            }
+            ImGui::SameLine();
+            later();
+            break;
+        case State::kDownloading:
+            ImGui::TextUnformatted("Downloading and checking the new version...");
+            ImGui::ProgressBar(updater::progress(), ImVec2(-1, 0));
+            break;
+        case State::kInstalled:
+            ImGui::TextUnformatted("Updated. Restarting...");
+            ImGui::EndPopup();
+            updater::restart();  // (returns only if the new program couldn't be started)
+            g_update_dismissed = true;
+            return;
+        case State::kInstallFailed:
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s Nothing was changed.", updater::error().c_str());
+            if (ImGui::Button("Try again", ImVec2(bw, 0))) updater::start_install();
+            ImGui::SameLine();
+            page();
+            later();
+            break;
+        default: break;
+    }
+    ImGui::EndPopup();
+}
+
 bool run() {
     settings::load();
     const float scale = std::max(1.0f, SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()));
@@ -391,6 +485,7 @@ bool run() {
     ImGui_ImplSDL3_InitForSDLRenderer(win, ren);
     ImGui_ImplSDLRenderer3_Init(ren);
 
+    if (settings::get("check_updates") != "0") updater::start_check();  // (in the background)
     bool play = false, done = false;
     while (!done) {
         SDL_Event e;
@@ -471,7 +566,6 @@ bool run() {
             if (ImGui::BeginCombo((std::string("##") + o.key).c_str(), cur_label)) {
                 for (const auto& c : o.choices) {
                     if (!std::strcmp(o.key, "renderer") && !std::strcmp(c.value, "vulkan") && !vulkan_built()) continue;
-                    if (!std::strcmp(o.key, "renderer") && !std::strcmp(c.value, "opengl") && platform::kVulkanOnly) continue;
                     const bool sel = cur == c.value;
                     if (ImGui::Selectable(c.label, sel)) settings::set(o.key, c.value);
                     if (sel) ImGui::SetItemDefaultFocus();
@@ -563,6 +657,12 @@ bool run() {
             ImGui::SameLine();
         }
         ImGui::TextDisabled("Settings: %s", privacy::scrub(settings::file_path()).c_str());  // (in screenshots too)
+        if (g_update_dismissed && updater::state() == updater::State::kAvailable) {  // "Not now": offer again here
+            ImGui::SameLine();
+            const std::string l = "Update to " + updater::latest_version();
+            if (ImGui::SmallButton(l.c_str())) g_update_dismissed = g_update_opened = false;
+        }
+        update_window();
         ImGui::End();
 
         ImGui::Render();
@@ -596,7 +696,8 @@ bool run() {
         // install has finished) and close it (testing).
         static bool shot_taken = false;
         static int idle_frames = 0;  // frames since no install is running
-        idle_frames = install::progress().state == 1 ? 0 : idle_frames + 1;
+        const bool update_busy = updater::state() == updater::State::kChecking || updater::state() == updater::State::kDownloading;
+        idle_frames = install::progress().state == 1 || update_busy ? 0 : idle_frames + 1;
         if (const char* shot = std::getenv("VC3_LAUNCHER_SHOT");
             shot && !shot_taken && ImGui::GetFrameCount() >= 20 && idle_frames >= 10) {
             shot_taken = true;

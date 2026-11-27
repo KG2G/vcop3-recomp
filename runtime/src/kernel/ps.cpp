@@ -23,6 +23,10 @@ const bool g_trace_threads = std::getenv("VC3_TRACE_THREADS") != nullptr;
 
 constexpr u32 kThreadExitSentinel = 0xFFFEFFF0;
 constexpr u32 kKthreadSize = 0x110;
+// The whole ETHREAD around it: XAPI's GetExitCodeThread reads ExitStatus at +0x120 once the
+// thread object is signalled (CRI's thread shutdown -- entering the test / service menu -- waits
+// for its threads' exit codes that way).
+constexpr u32 kEthreadSize = 0x140, kExitStatus = 0x120;
 
 struct ThreadExit {
     u32 status;
@@ -66,7 +70,7 @@ GuestThread& create_thread(u32 stack_size, u32 tls_size, u32 start, u32 context,
     const u32 lo = mm::alloc_pages(total, 0x10000, 0xFFFFFFFF, mm::kPage, true);
     const u32 hi = lo + total;
 
-    const u32 kt = alloc_object(kKthreadSize, data_export_addr("PsThreadObjectType"));
+    const u32 kt = alloc_object(kEthreadSize, data_export_addr("PsThreadObjectType"));
     init_dispatcher_header(kt, kThreadObject, kKthreadSize / 4, 0);
     wr<u32>(kt + 0x1C, hi);
     wr<u32>(kt + 0x20, lo);
@@ -119,6 +123,7 @@ void thread_main(GuestThread* t) {
     }
     if (trace_enabled()) std::fprintf(stderr, "[ps] thread %u exited (%08x)\n", t->id, status);
 
+    wr<u32>(t->kthread + kExitStatus, status);  // (before the object is signalled: GetExitCodeThread)
     signal_object(t->kthread, 1);
     sched::gil_release();
     std::lock_guard lk(g_threads_m);

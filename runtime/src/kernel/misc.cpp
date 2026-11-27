@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "../log.h"
+#include "../platform.h"
+#include "io/jvs.h"
 #include "gpu/nv2a.h"
 #include "kernel.h"
 #include "mm.h"
@@ -57,6 +59,15 @@ KEXPORT(ExQueryNonVolatileSetting) {
 KEXPORT(HalRegisterShutdownNotification) { return 0; }
 KEXPORT(HalReturnToFirmware) {
     std::fprintf(stderr, "[hal] HalReturnToFirmware(%u): guest requested reboot/shutdown\n", a[0]);
+    // The cabinet reboots into its test menu after TEST (and back into the game when the menu is
+    // left). No BIOS here: restart the program the same way (VC3_TEST_MODE: the test menu).
+    const char* tm = std::getenv("VC3_TEST_MODE");
+    const bool in_test = tm && std::atoi(tm);
+    if (in_test || io::test_pressed_within(15.0)) {
+        log::end(in_test ? "test menu left: restarting the game" : "TEST: restarting into the test menu");
+        platform::relaunch(!in_test);
+        std::fprintf(stderr, "[hal] restart failed\n");
+    }
     // Quit without running global destructors: the renderer and audio threads are still
     // going (std::exit tore their state down under them: a crash on the way out).
     log::end("the game asked to restart; closed");

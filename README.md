@@ -23,8 +23,12 @@ recompiled from.
 3. Press **INSTALL**. When it's done the launcher shows **Settings** so you can set things up
    (renderer, window, controls, ...); then press **PLAY**. From then on the button is just **PLAY**.
 
-Settings and the installed game live in the per-user data folder (Linux:
-`~/.local/share/vcop3-recomp/vcop3-recomp/`) unless you choose another install folder.
+By default the game, its settings and the log live in the per-user data folder (Linux:
+`~/.local/share/vcop3-recomp/vcop3-recomp/`, Windows: `%APPDATA%\vcop3-recomp\vcop3-recomp\`).
+Choose another **Install to** folder and everything goes there instead (the game files, saves and
+shader caches in `work`, plus `settings.ini` and `vc3.log`): it's portable. Install into the
+program's own folder and that folder can be moved or copied as a whole; for a folder elsewhere, a
+one-line `location.txt` in the per-user folder points the program to it.
 Command-line options and environment variables: [docs/OPTIONS.md](docs/OPTIONS.md).
 
 ### Launcher
@@ -42,10 +46,17 @@ Command-line options and environment variables: [docs/OPTIONS.md](docs/OPTIONS.m
   them with Windows over Bluetooth first). Windows moves its cursor with every mouse, so there give each player their own
   device rather than pairing one with "System mouse".
 - **Game files**: install as above.
+- **Updates**: when the launcher starts it checks GitHub for a newer version (Settings > Updates >
+  Check for updates, on by default). If there is one, its changes are shown and you choose whether
+  to update: only the program file is downloaded (its SHA-256 checked against the release) and
+  replaced, then it restarts -- the installed game, settings and saves stay.
 
 Default controls (player 1): mouse aims, left button fires, right button reloads, middle button
 or `E` changes weapon, Space is the pedal (E.S. slow motion), `1` starts, `5` inserts a coin
 (player 2: `2` and `6`); F2 / F3 test / service; F11 or Alt+Enter toggles fullscreen.
+TEST (F2) during play restarts into the game's test menu, as on the cabinet (SERVICE moves, TEST
+selects; EXIT restarts the game). Its settings (difficulty, lives, gun adjustment, bookkeeping) are
+kept like the cabinet's battery-backed memory, in `work/hdd` of the install folder.
 Gamepads: right trigger fires, left trigger reloads, A pedal, X change weapon, Start, Back coin.
 
 ## Building from source
@@ -76,8 +87,8 @@ build/runtime/vc3
 `tools/windows/build.sh` cross-compiles the Windows `.exe` with MinGW-w64 (both need Docker and
 step 2 done).
 
-The Windows build uses the Vulkan renderer (any current NVIDIA, AMD or Intel driver) and needs
-Windows 10 version 1803 or newer.
+The Windows build renders with Vulkan by default (any current NVIDIA, AMD or Intel driver) or
+OpenGL 4.5, and needs Windows 10 version 1803 or newer.
 
 ## Third-party code
 
