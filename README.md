@@ -37,7 +37,10 @@ Command-line options and environment variables: [docs/OPTIONS.md](docs/OPTIONS.m
 - **Controls**: per player, the aim device (system mouse, a gamepad stick, one specific mouse or
   lightgun read on its own, a Wiimote's IR pointer) and the inputs for trigger, reload, pedal,
   change weapon, start and coin; test / service; gamepad aim speed; controller API. On Linux,
-  separate mice, lightguns and Wiimotes are read from `/dev/input` (be in the `input` group).
+  separate mice, lightguns and Wiimotes are read from `/dev/input` (be in the `input` group); on
+  Windows mice and lightguns through Raw Input and Wiimotes over HID (experimental on Windows; pair
+  them with Windows over Bluetooth first). Windows moves its cursor with every mouse, so there give each player their own
+  device rather than pairing one with "System mouse".
 - **Game files**: install as above.
 
 Default controls (player 1): mouse aims, left button fires, right button reloads, middle button
@@ -74,8 +77,7 @@ build/runtime/vc3
 step 2 done).
 
 The Windows build uses the Vulkan renderer (any current NVIDIA, AMD or Intel driver) and needs
-Windows 10 version 1803 or newer. Separate raw mice / lightguns and Wiimotes are Linux-only for
-now; the system mouse and gamepads work on both.
+Windows 10 version 1803 or newer.
 
 ## Third-party code
 

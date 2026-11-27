@@ -2,8 +2,9 @@
 //
 // Each player has an aim device and bindings for the cabinet's buttons:
 //   aim:      "mouse"     the system mouse (cursor)
-//             "raw:NAME"  one specific mouse or lightgun, read on its own (Linux: evdev, so
-//                         two mice/guns don't share a cursor; needs read access to /dev/input)
+//             "raw:NAME"  one specific mouse, lightgun or Wiimote, read on its own, so two
+//                         mice/guns don't share a cursor (Linux: evdev, needs read access to
+//                         /dev/input; Windows: Raw Input for mice / guns, HID for Wiimotes)
 //             "pad"       the player's gamepad, right stick (left stick: "pad_left")
 //             "none"
 //   pad:      which gamepad belongs to the player: "1", "2", ... (connection order)

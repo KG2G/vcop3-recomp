@@ -228,6 +228,11 @@ void controls_page(float label_w) {
     ImGui::Spacing();
     ImGui::TextWrapped("Mouse buttons are the buttons of the player's aim device (the system mouse, or the chosen "
                        "mouse / lightgun). Pad buttons are the player's gamepad. F2 / F3: test / service.");
+#ifdef _WIN32
+    ImGui::TextWrapped("Separate mice, lightguns and Wiimotes: Windows moves its cursor with every mouse, so give each "
+                       "player their own device instead of pairing one with \"System mouse\". Wiimote support on Windows "
+                       "is experimental: pair them with Windows over Bluetooth first.");
+#endif
     if (!raw_ok)
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
                            "Individual mice and lightguns can't be read: add yourself to the 'input' group\n"
