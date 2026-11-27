@@ -239,6 +239,9 @@ std::mutex g_pick_m;
 std::string g_picked[3];  // set by the file dialog callbacks (any thread): zip, chd, install folder
 install::Files g_files;
 bool g_press_main = false;  // (testing: VC3_LAUNCHER_AUTOINSTALL presses the main button)
+// An install finished in this session: show the Settings tab once and say the game is ready, so
+// players can set things up before the first start (the install doesn't start the game).
+bool g_just_installed = false, g_show_settings = false;
 bool g_files_init = false;
 
 void SDLCALL on_pick(void* which, const char* const* list, int) {
@@ -326,7 +329,7 @@ void game_files_page(SDL_Window* win, float label_w) {
         }
     }
     ImGui::Spacing();
-    // Installing starts from the INSTALL AND PLAY button below; here only a reinstall.
+    // Installing starts from the INSTALL button below; here only a reinstall.
     const bool busy = pr.state == 1;
     if (ok) {
         ImGui::BeginDisabled(busy || g_files.pic.empty() || g_files.chd.empty());
@@ -338,8 +341,8 @@ void game_files_page(SDL_Window* win, float label_w) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled | ImGuiHoveredFlags_DelayShort))
             ImGui::SetTooltip("Install the game files again from the zip and CHD above.");
     } else if (!busy && pr.state != 3) {
-        ImGui::TextDisabled(g_files.pic.empty() || g_files.chd.empty() ? "Pick both files, then press INSTALL AND PLAY."
-                                                                       : "Press INSTALL AND PLAY below.");
+        ImGui::TextDisabled(g_files.pic.empty() || g_files.chd.empty() ? "Pick both files, then press INSTALL."
+                                                                       : "Press INSTALL below.");
     }
     if (pr.state != 0) {
         std::string msg;
@@ -435,7 +438,8 @@ bool run() {
         const float label_w = ImGui::GetContentRegionAvail().x * 0.34f;
         const float footer = ImGui::GetFrameHeightWithSpacing() * 2 + ImGui::GetTextLineHeightWithSpacing() * 2;
         ImGui::BeginTabBar("tabs");
-        const bool on_settings = ImGui::BeginTabItem("Settings");
+        const bool on_settings = ImGui::BeginTabItem("Settings", nullptr, g_show_settings ? ImGuiTabItemFlags_SetSelected : 0);
+        g_show_settings = false;
         if (on_settings) {
         ImGui::BeginChild("settings", ImVec2(0, -footer));
         // VC3_LAUNCHER_SCROLL=1 (testing): the end of the list, for screenshots.
@@ -508,24 +512,22 @@ bool run() {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.10f, 0.12f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.15f, 0.17f, 1.0f));
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        // One button: PLAY once the game is installed; before that INSTALL AND PLAY installs
-        // from the picked files and starts the game when it's done.
-        static bool play_after_install = false;
+        // One button: PLAY once the game is installed; before that INSTALL installs from the
+        // picked files. It doesn't start the game: the launcher stays open on Settings so players
+        // can set things up first, and the button becomes PLAY.
+        static bool install_pressed = false;
         install::Progress& ipr = install::progress();
         const bool installing = ipr.state == 1;
         const bool ready = !installing && install::installed();
         const bool can_install = !installing && !ready && !g_files.pic.empty() && !g_files.chd.empty();
-        if (play_after_install && !installing) {
-            play_after_install = false;
-            if (ready) {
-                play = true;
-                done = true;
-            }
+        if (install_pressed && !installing) {
+            install_pressed = false;
+            if (ready) g_just_installed = g_show_settings = true;
         }
         char label[96];
         if (ready) std::snprintf(label, sizeof label, "PLAY");
         else if (installing) std::snprintf(label, sizeof label, "Installing... %d%%", int(ipr.fraction * 100.0f));
-        else if (can_install) std::snprintf(label, sizeof label, "INSTALL AND PLAY");
+        else if (can_install) std::snprintf(label, sizeof label, "INSTALL");
         else std::snprintf(label, sizeof label, "PLAY (pick your game files first)");
         ImGui::BeginDisabled(!ready && !can_install);
         const bool pressed = ImGui::Button(label, ImVec2(bw, 0)) || (g_press_main && (ready || can_install));
@@ -537,7 +539,7 @@ bool run() {
             } else {
                 settings::save();  // keep the chosen install folder
                 install::start(g_files);
-                play_after_install = true;
+                install_pressed = true;
             }
         }
         ImGui::EndDisabled();
@@ -545,6 +547,8 @@ bool run() {
         ImGui::SameLine();
         if (ImGui::Button("Quit", ImVec2(bw, 0))) done = true;
         ImGui::Spacing();
+        if (g_just_installed && ready)
+            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "Installed. Check the settings, then press PLAY.");
         // The log, for bug reports (it holds no personal information: see log.h).
         if (!log::folder().empty()) {
             if (ImGui::SmallButton("Open log folder")) SDL_OpenURL(("file://" + log::folder()).c_str());
@@ -566,8 +570,8 @@ bool run() {
             std::lock_guard lk(g_pick_m);
             g_picked[2] = ad;
         }
-        // VC3_LAUNCHER_AUTOINSTALL="zip|chd" (testing): pick these files and press INSTALL AND
-        // PLAY at frame 5, as a player would.
+        // VC3_LAUNCHER_AUTOINSTALL="zip|chd" (testing): pick these files and press INSTALL at
+        // frame 5, as a player would.
         if (const char* ai = std::getenv("VC3_LAUNCHER_AUTOINSTALL"); ai && ImGui::GetFrameCount() == 5) {
             const std::string v = ai;
             const size_t bar = v.find('|');
@@ -583,8 +587,14 @@ bool run() {
             play = true;
             done = true;
         }
-        // VC3_LAUNCHER_SHOT=file.ppm: save the launcher as drawn and close it (testing).
-        if (const char* shot = std::getenv("VC3_LAUNCHER_SHOT"); shot && ImGui::GetFrameCount() == 20) {
+        // VC3_LAUNCHER_SHOT=file.ppm: save the launcher as drawn (from frame 20, 10 frames after any
+        // install has finished) and close it (testing).
+        static bool shot_taken = false;
+        static int idle_frames = 0;  // frames since no install is running
+        idle_frames = install::progress().state == 1 ? 0 : idle_frames + 1;
+        if (const char* shot = std::getenv("VC3_LAUNCHER_SHOT");
+            shot && !shot_taken && ImGui::GetFrameCount() >= 20 && idle_frames >= 10) {
+            shot_taken = true;
             if (SDL_Surface* s = SDL_RenderReadPixels(ren, nullptr)) {
                 SDL_Surface* rgb = SDL_ConvertSurface(s, SDL_PIXELFORMAT_RGB24);
                 if (std::FILE* f = rgb ? std::fopen(shot, "wb") : nullptr) {

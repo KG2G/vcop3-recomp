@@ -53,7 +53,7 @@ namespace vc3::hwwatch { void init(); }
 namespace {
 // F9: save what's needed to look into a problem seen on screen, in work/captures/<time>/:
 // every draw of the next frame (images + draws.txt, with the widescreen HUD decisions), the
-// window as shown, guest RAM 0-16 MiB, and the settings in effect.
+// window as shown, all of guest RAM, and the settings in effect.
 void capture() {
     char stamp[32];
     const std::time_t t = std::time(nullptr);
@@ -64,8 +64,8 @@ void capture() {
     if (ec) return;
     vc3::gpu::pgraph::glb::request_draw_trace(dir);
     vc3::gpu::request_window_shot(dir + "/window.ppm");
-    if (std::FILE* f = std::fopen((dir + "/ram.bin").c_str(), "wb")) {
-        std::fwrite(vc3::host_ptr(0), 1, 16u << 20, f);
+    if (std::FILE* f = std::fopen((dir + "/ram.bin").c_str(), "wb")) {  // all of guest RAM (textures too)
+        std::fwrite(vc3::host_ptr(0), 1, vc3::mem::kRamSize, f);
         std::fclose(f);
     }
     if (std::FILE* f = std::fopen((dir + "/settings.txt").c_str(), "w")) {
@@ -76,7 +76,7 @@ void capture() {
                      vc3::gpu::pgraph::glb::no_cull() ? "OFF" : "on");
         std::fclose(f);
     }
-    std::fprintf(stderr, "[capture] saved to %s\n", dir.c_str());
+    std::fprintf(stderr, "[capture] %.1f s: saved to %s\n", log::uptime(), dir.c_str());
 }
 }  // namespace
 

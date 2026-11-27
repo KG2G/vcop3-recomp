@@ -78,6 +78,7 @@ void call_indirect(Cpu& c, uint32_t target, uint32_t ret_addr);
 void guest_hook(Cpu& c, uint32_t entry);
 // Once per guest vblank (video timing thread): cabinet settings applied to game state.
 void per_vblank();
+void request_scene_skip();  // testing: end the current section (see hooks.cpp)
 // Player p (0, 1) is in a game (playing or at the continue countdown).
 bool player_in_game(int p);
 GuestFunc lookup_function(uint32_t addr);

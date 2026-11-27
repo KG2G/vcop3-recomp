@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <deque>
+#include <filesystem>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
@@ -100,6 +102,9 @@ std::set<uint32_t> g_seen;
 struct { uint32_t frames, idle_frames, voices, traps, fetches, locked_skips, underruns, lock_waits, idle_trapped, idle_halted; } g_stat{};
 bool g_mute[kMaxVoices] = {};  // VC3_APU_MUTE=v,v,... / VC3_APU_SOLO (debugging)
 double g_bin_energy[kMixbins] = {};  // per-mixbin signal energy since the last status line
+// VC3_TRACE_APU: how long front-end traps stay open (raised -> DSOUND resumes the FE), in ns.
+std::atomic<int64_t> g_trap_raised_ns{0}, g_trap_open_sum_ns{0}, g_trap_open_max_ns{0}, g_traps_closed{0};
+int64_t now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
 
 const Clock::time_point g_epoch = Clock::now();
 
@@ -138,11 +143,31 @@ void notify(uint16_t v, int notifier) {
     update_irq();
 }
 
+// A voice starting: its notifiers read "in progress" again. Without this a reused voice
+// still showed the "done" its previous sound left, so DSOUND took a buffer it had just
+// started for already finished: the game then started it again on a fresh voice every
+// frame (the subway train: thousands of restarts, copies never stopped piling up into a
+// repeating noise, gunshots and lines left without a voice).
+void notifiers_in_progress(uint16_t v) {
+    if (!reg(FENADDR)) return;
+    for (int n = 0; n < 2; ++n) {
+        const uint32_t addr = (reg(FENADDR) + 16u * (2 + v * 4u + n) + 15) & 0x7FFFFFF;
+        wr<uint8_t>(addr, 0x80);  // NV1BA0_NOTIFICATION_STATUS_IN_PROGRESS
+    }
+}
+
 void voice_off(uint16_t v) {
     vset(v, V_STATE, ST_ACTIVE, 0);
     int n = kNotifierSslaDone;
     if (vget(v, V_FMT) & FMT_STREAM) n += g_vh[v].ssl_index & 1;
     notify(v, n);
+}
+
+// VC3_TRACE_APU: why a voice stopped (with its buffer, to match the VOICE_ON line).
+void trace_stop(uint16_t v, const char* why) {
+    if (!g_trace) return;
+    std::fprintf(stderr, "[apu] voice %u stop: %s (ba %06x cbo %06x, state %08x)\n", v, why, vget(v, V_BA) & 0xFFFFFF,
+                 vget(v, V_OFFSET) & 0xFFFFFF, vget(v, V_STATE));
 }
 
 void reset_host(uint16_t v) {
@@ -159,6 +184,8 @@ uint32_t sge_addr(uint32_t linear);
 void voice_on(uint32_t arg) {
     const uint16_t v = uint16_t(arg);
     if (v >= kMaxVoices) return;
+    if (g_trace && (vget(v, V_STATE) & ST_ACTIVE))
+        std::fprintf(stderr, "[apu] voice %u started again while still playing\n", v);
     const uint32_t list = (reg(FEAV) >> 16) & 3;
     if (list != 0) {  // insert at the top of the 2D / 3D / MP list
         uint32_t& top = reg(TVL2D + 12 * (list - 1));
@@ -173,6 +200,7 @@ void voice_on(uint32_t arg) {
     }
     vset(v, V_OFFSET, 0xFFFFFF, 0);  // CBO
     reset_host(v);
+    notifiers_in_progress(v);
     // Envelope start states and their initial counts.
     const uint32_t ea = arg >> 28, ef = (arg >> 24) & 0xF;
     vset(v, V_STATE, 0xF0000000, ea);
@@ -190,13 +218,29 @@ void voice_on(uint32_t arg) {
         const uint32_t fmt = vget(v, V_FMT);
         std::fprintf(stderr,
                      "[apu] voice %u on list %u: fmt %08x (%s %s cs%u ss%u spb%u%s%s) ba %06x lbo %06x ebo %06x "
-                     "pitch %d vbin %08x vol %08x %08x %08x ssl %x/%u %x/%u env %x\n",
+                     "pitch %d vbin %08x vol %08x %08x %08x ssl %x/%u %x/%u env %x misc %08x fca %08x fcb %08x\n",
                      v, list, fmt, (fmt & FMT_STREAM) ? "stream" : "buffer", (fmt & FMT_STEREO) ? "stereo" : "mono",
                      fmt >> 30, (fmt >> 28) & 3, ((fmt >> 16) & 31) + 1, (fmt & FMT_LOOP) ? " loop" : "",
                      (fmt & FMT_MULTIPASS) ? " multipass" : "", vget(v, V_BA) & 0xFFFFFF, vget(v, V_LBO) & 0xFFFFFF,
                      vget(v, V_NEXT) & 0xFFFFFF, int16_t(vget(v, V_PITCH_LINK) >> 16), vget(v, V_VBIN),
                      vget(v, V_VOLA), vget(v, V_VOLB), vget(v, V_VOLC), g_vh[v].ssl_base[0], g_vh[v].ssl_count[0],
-                     g_vh[v].ssl_base[1], g_vh[v].ssl_count[1], arg >> 24);
+                     g_vh[v].ssl_base[1], g_vh[v].ssl_count[1], arg >> 24, vget(v, V_MISC), vget(v, V_FCA), vget(v, V_FCB));
+        if (!(fmt & FMT_STREAM) && (fmt >> 30) == 0) {  // 8-bit: raw bytes (signedness check)
+            const uint32_t ba = vget(v, V_BA) & 0xFFFFFF;
+            std::fprintf(stderr, "[apu]   8-bit data:");
+            for (int i = 0; i < 48; ++i) std::fprintf(stderr, " %02x", rd<uint8_t>(sge_addr(ba + 64 + i)));
+            const uint32_t n = std::min<uint32_t>(8192, vget(v, V_NEXT) & 0xFFFFFF);
+            double du = 0, ds = 0, mu = 0;
+            for (uint32_t i = 1; i < n; ++i) {
+                const int a = rd<uint8_t>(sge_addr(ba + i - 1)), b = rd<uint8_t>(sge_addr(ba + i));
+                du += std::abs(b - a);
+                ds += std::abs(int(int8_t(b)) - int(int8_t(a)));
+                mu += b;
+            }
+            if (n > 1)
+                std::fprintf(stderr, " | %u bytes: mean %.1f, mean step unsigned %.1f signed %.1f\n", n, mu / (n - 1), du / (n - 1), ds / (n - 1));
+            else std::fprintf(stderr, "\n");
+        }
         if (!(fmt & FMT_STREAM) && (fmt >> 30) == 1) {
             const uint32_t ba = vget(v, V_BA) & 0xFFFFFF;
             std::fprintf(stderr, "[apu]   sge[%u]=%08x data:", ba >> 12,
@@ -229,7 +273,36 @@ constexpr FieldMethod kFieldMethods[] = {
 
 int g_trace_voice = -1;  // VC3_TRACE_APU_VOICE=v: log every method touching voice v
 
+// VC3_TRACE_APU: the last APU accesses (FE methods, register reads and writes, idle-voice
+// traps), dumped when a looping voice is released before it has played anything -- to see
+// what the game did and read in between.
+struct TraceEvent { char kind; uint32_t a, b, c; };
+TraceEvent g_ring[64];
+unsigned g_ring_pos = 0;
+void ring(char kind, uint32_t a, uint32_t b, uint32_t c = 0) {
+    if (!g_trace) return;
+    g_ring[g_ring_pos++ % 64] = {kind, a, b, c};
+}
+void dump_ring(const char* why) {
+    static int dumps = 0;
+    if (!g_trace || ++dumps > 20) return;
+    std::fprintf(stderr, "[apu] --- last APU accesses before %s (oldest first):\n", why);
+    for (unsigned i = 0; i < 64; ++i) {
+        const TraceEvent& e = g_ring[(g_ring_pos + i) % 64];
+        if (!e.kind) continue;
+        switch (e.kind) {
+            case 'M': std::fprintf(stderr, "[apu]   method %#05x arg %#010x (current voice %u)\n", e.a, e.b, e.c); break;
+            case 'R': std::fprintf(stderr, "[apu]   read  %#07x -> %#010x\n", e.a, e.b); break;
+            case 'W': std::fprintf(stderr, "[apu]   write %#07x = %#010x\n", e.a, e.b); break;
+            case 'T': std::fprintf(stderr, "[apu]   idle-voice trap raised for voice %u\n", e.a); break;
+            case 'I': std::fprintf(stderr, "[apu]   voice %u went idle (%s)\n", e.a, e.b ? "envelope" : "other"); break;
+        }
+    }
+    std::fprintf(stderr, "[apu] ---\n");
+}
+
 void fe_method(uint32_t m, uint32_t arg) {
+    ring('M', m, arg, reg(FECV));
     if (g_trace_voice >= 0 &&
         ((m != 0x2F8 && reg(FECV) == uint32_t(g_trace_voice)) || (m >= 0x120 && m <= 0x140 && (arg & 0xFFFF) == uint32_t(g_trace_voice)) ||
          (m == 0x2F8 && arg == uint32_t(g_trace_voice)))) {
@@ -249,8 +322,21 @@ void fe_method(uint32_t m, uint32_t arg) {
     switch (m) {
         case 0x120: reg(FEAV) = arg; break;                     // SET_ANTECEDENT_VOICE
         case 0x124: voice_on(arg); break;                       // VOICE_ON
-        case 0x128: if ((arg & 0xFFFF) < kMaxVoices) voice_off(uint16_t(arg)); break;
-        case 0x12C: voice_release(uint16_t(arg)); break;        // VOICE_RELEASE
+        case 0x128:                                             // VOICE_OFF
+            if ((arg & 0xFFFF) < kMaxVoices) {
+                trace_stop(uint16_t(arg), "VOICE_OFF from the game");
+                voice_off(uint16_t(arg));
+            }
+            break;
+        case 0x12C:                                             // VOICE_RELEASE
+            if ((arg & 0xFFFF) < kMaxVoices) {
+                trace_stop(uint16_t(arg), "VOICE_RELEASE from the game");
+                const uint16_t rv = uint16_t(arg);
+                if (g_trace && reg(VPVADDR) && (vget(rv, V_FMT) & FMT_LOOP) && (vget(rv, V_OFFSET) & 0xFFFFFF) == 0)
+                    dump_ring("a looping voice was released before playing");
+            }
+            voice_release(uint16_t(arg));
+            break;
         case 0x140:                                             // VOICE_PAUSE
             if ((arg & 0xFFFF) < kMaxVoices) vset(uint16_t(arg), V_STATE, ST_PAUSED, (arg >> 18) & 1);
             break;
@@ -370,7 +456,10 @@ float step_envelope(uint16_t v, const EnvRegs& e) {
             return value / 255.0f;
         }
         case E_FORCE_RELEASE:
-            if (e.cnt_mask == kEnvA.cnt_mask) voice_off(v);
+            if (e.cnt_mask == kEnvA.cnt_mask) {
+                if (vget(v, V_STATE) & ST_ACTIVE) trace_stop(v, "amplitude envelope ended");
+                voice_off(v);
+            }
             return 0.0f;
         default:
             return 0.0f;
@@ -522,6 +611,7 @@ bool fetch(uint16_t v, float out[2]) {
             cbo = vget(v, V_LBO) & 0xFFFFFF;
         } else {
             vset(v, V_OFFSET, 0xFFFFFF, ebo);
+            trace_stop(v, "end of a one-shot buffer");
             voice_off(v);
             return true;  // this last sample still plays
         }
@@ -691,12 +781,96 @@ void downmix(const float (*mix)[kFrame], float* out /* kFrame*2 */) {
     if (g_reverb_wet > 0) {
         float dry[kFrame * 2];
         if (g_trace) std::memcpy(dry, out, sizeof dry);
-        g_reverb.process(mix[kI3dl2Bin], out, kFrame, g_reverb_wet);
+        // Keep the stand-in at a steady gain from the send. On hardware the game's I3DL2 room
+        // settings (applied by the DSP, which isn't emulated) set the reverb level; the
+        // stand-in's own gain varies with its input -- with a sustained loud send it rang up
+        // to 2.4x the send. Some scenes (the subway at the Brand fight, the final boss's
+        // hall, the ending) send most of the sound to the reverb: unregulated it came out
+        // twice as loud as everything else and clipped into static, while holding it under
+        // the (quiet) dry mix made the whole scene go quiet. So the output is regulated to a
+        // fixed share of the send (measured over ~0.3 s): the game's send levels decide how
+        // much reverb there is, as on hardware; the output limiter catches peaks.
+        float wet[kFrame * 2] = {};
+        g_reverb.process(mix[kI3dl2Bin], wet, kFrame, g_reverb_wet);
+        double se = 0, we = 0;
+        for (int i = 0; i < kFrame; ++i) se += double(mix[kI3dl2Bin][i]) * mix[kI3dl2Bin][i];
+        for (int i = 0; i < kFrame * 2; ++i) we += double(wet[i]) * wet[i];
+        se /= kFrame;
+        we /= kFrame * 2;
+        static double send_env = 0, wet_env = 0, cap_s = 1.0;
+        send_env += (se - send_env) * 0.05;
+        wet_env += (we - wet_env) * 0.05;
+        constexpr double kWetToSend = 0.7;  // about -3 dB
+        const double cap = wet_env > 1e-12 ? std::min(1.0, kWetToSend * std::sqrt(send_env / wet_env)) : 1.0;
+        cap_s += (cap - cap_s) * (cap < cap_s ? 0.2 : 0.02);  // down quickly, back up gently
+        for (int i = 0; i < kFrame * 2; ++i) out[i] += wet[i] * float(cap_s);
         if (g_trace)
             for (int i = 0; i < kFrame * 2; ++i) {
                 g_dry_energy += double(dry[i]) * dry[i];
                 g_wet_energy += double(out[i] - dry[i]) * (out[i] - dry[i]);
             }
+    }
+}
+
+// VC3_APU_STEMS=ba,ba,... (debugging): every voice playing one of those buffers (base address, hex,
+// as VC3_TRACE_APU prints it) is also written on its own to work/stems/<ba>.wav (dry, stereo downmix,
+// time-aligned with VC3_WAV), from VC3_APU_STEMS_FROM seconds of audio on.
+struct Stem { uint32_t ba; FILE* f = nullptr; uint32_t bytes = 0; float buf[kFrame * 2] = {}; bool used = false; };
+std::deque<Stem> g_stems;  // (deque: pointers stay valid as stems are added)
+bool g_stems_auto = false;  // VC3_APU_STEMS=loop: every looping or streaming voice
+uint64_t g_frames_total = 0, g_stems_from = 0;
+void stems_init() {
+    if (const char* e = std::getenv("VC3_APU_STEMS"); e && !std::strcmp(e, "loop")) g_stems_auto = true;
+    else if (e)
+        for (const char* p = e; *p;) {
+            char* end;
+            Stem st;
+            st.ba = uint32_t(std::strtoul(p, &end, 16));
+            if (end == p) break;
+            g_stems.push_back(st);
+            p = *end ? end + 1 : end;
+        }
+    if (const char* e = std::getenv("VC3_APU_STEMS_FROM")) g_stems_from = uint64_t(std::atof(e) * 48000 / kFrame);
+}
+Stem* stem_for(uint16_t v) {
+    if (g_stems.empty() && !g_stems_auto) return nullptr;
+    const uint32_t ba = vget(v, V_BA) & 0xFFFFFF;
+    for (Stem& st : g_stems) if (st.ba == ba) return &st;
+    if (!g_stems_auto || g_frames_total < g_stems_from || !(vget(v, V_FMT) & (FMT_LOOP | FMT_STREAM))) return nullptr;
+    g_stems.emplace_back();
+    g_stems.back().ba = ba;
+    return &g_stems.back();
+}
+void stems_write() {
+    ++g_frames_total;
+    if (g_frames_total < g_stems_from) { for (Stem& st : g_stems) st.used = false; return; }
+    for (Stem& st : g_stems) {
+        if (!st.f) {
+            std::filesystem::create_directories("work/stems");
+            char name[64];
+            std::snprintf(name, sizeof name, "work/stems/%06x.wav", st.ba);
+            st.f = std::fopen(name, "wb");
+            if (!st.f) continue;
+            uint8_t h[44] = {'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,2,0,
+                             0x80,0xBB,0,0,0x00,0xEE,0x02,0,4,0,16,0,'d','a','t','a',0,0,0,0};
+            std::fwrite(h, 1, 44, st.f);
+            // silence up to now, so every stem lines up with the others
+            const int16_t zero[kFrame * 2] = {};
+            for (uint64_t k = g_stems_from; k + 1 < g_frames_total; ++k) { std::fwrite(zero, 2, kFrame * 2, st.f); st.bytes += sizeof zero; }
+        }
+        int16_t pcm[kFrame * 2];
+        for (int i = 0; i < kFrame * 2; ++i)
+            pcm[i] = int16_t(std::clamp(st.used ? st.buf[i] : 0.0f, -1.0f, 1.0f) * 32767.0f);
+        std::fwrite(pcm, 2, kFrame * 2, st.f);
+        st.bytes += sizeof pcm;
+        if ((st.bytes & 0xFFFFF) < sizeof pcm) {  // keep the header current (about every MiB)
+            const long pos = std::ftell(st.f);
+            uint32_t riff = 36 + st.bytes;
+            std::fseek(st.f, 4, SEEK_SET); std::fwrite(&riff, 4, 1, st.f);
+            std::fseek(st.f, 40, SEEK_SET); std::fwrite(&st.bytes, 4, 1, st.f);
+            std::fseek(st.f, pos, SEEK_SET);
+        }
+        st.used = false;
     }
 }
 
@@ -727,17 +901,31 @@ bool run_frame(float* out) {
                 if (!trapped && (reg(FETFORCE1) & FETFORCE1_IDLE_VOICE)) {
                     reg(FEDECMETH) = SE2FE_IDLE_VOICE;
                     reg(FEDECPARAM) = v;
+                    ring('T', v, 0);
                     reg(FECTL) = (reg(FECTL) & ~(FECTL_METHMODE | FECTL_TRAPREASON)) | FECTL_TRAPPED |
                                  FECTL_TRAP_REQUESTED;
                     trapped = true;
                     ++g_stat.traps;
+                    g_trap_raised_ns.store(now_ns(), std::memory_order_relaxed);
                     update_irq();
                 }
             } else if (g_vh[v].locked) {
                 ++g_stat.locked_skips;
             } else if (!g_mute[v]) {
                 ++g_stat.voices;
-                process_voice(v, mix);
+                if (Stem* st = stem_for(v)) {  // VC3_APU_STEMS: this voice on its own as well
+                    float solo[kMixbins][kFrame] = {};
+                    process_voice(v, solo);
+                    for (int b = 0; b < kMixbins; ++b)
+                        for (int i = 0; i < kFrame; ++i) mix[b][i] += solo[b][i];
+                    float o[kFrame * 2];
+                    downmix(solo, o);
+                    if (!st->used) std::fill(std::begin(st->buf), std::end(st->buf), 0.0f);
+                    for (int i = 0; i < kFrame * 2; ++i) st->buf[i] += o[i];
+                    st->used = true;
+                } else {
+                    process_voice(v, mix);
+                }
             }
             v = nxt;
         }
@@ -746,6 +934,7 @@ bool run_frame(float* out) {
         for (int b = 0; b < kMixbins; ++b)
             for (int i = 0; i < kFrame; ++i) g_bin_energy[b] += double(mix[b][i]) * mix[b][i];
     downmix(mix, out);
+    if (!g_stems.empty() || g_stems_auto) stems_write();
     return true;
 }
 
@@ -762,7 +951,15 @@ void gp_mailbox() {
     const uint32_t cmd_addr = page + 0x810;
     const uint32_t cmd = rd<uint32_t>(cmd_addr);
     if (cmd == 0) return;
-    if (g_trace) std::fprintf(stderr, "[apu] GP command %#x acknowledged\n", cmd);
+    if (g_trace) {
+        std::fprintf(stderr, "[apu] GP command %#x acknowledged; scratch pages:", cmd);
+        for (uint32_t i = 0; i < 64; ++i) {
+            const uint32_t pg = rd<uint32_t>(sge + 8 * i) & 0x7FFFF000;
+            if (!pg) break;
+            std::fprintf(stderr, " %x", pg);
+        }
+        std::fprintf(stderr, "\n");
+    }
     wr<uint32_t>(cmd_addr, 0);
 }
 
@@ -790,8 +987,18 @@ void wav_header() {
 
 void output(const float* buf, int frames) {
     int16_t pcm[kFrame * kFramesPerChunk * 2];
-    for (int i = 0; i < frames * 2; ++i)
-        pcm[i] = int16_t(std::lrint(std::clamp(buf[i] * g_volume, -1.0f, 1.0f) * 32767.0f));
+    // Safety limiter: peaks over the ceiling turn the level down briefly (fast attack,
+    // ~100 ms release) instead of being clipped, which crackles like static.
+    static float gain = 1.0f;
+    constexpr float kCeiling = 0.95f, kRelease = 1.0f / (0.1f * 48000.0f);
+    for (int i = 0; i < frames; ++i) {
+        const float l = buf[2 * i] * g_volume, r = buf[2 * i + 1] * g_volume;
+        const float peak = std::max(std::fabs(l), std::fabs(r));
+        if (peak * gain > kCeiling) gain = kCeiling / peak;
+        else gain = std::min(1.0f, gain + kRelease);
+        pcm[2 * i] = int16_t(std::lrint(std::clamp(l * gain, -1.0f, 1.0f) * 32767.0f));
+        pcm[2 * i + 1] = int16_t(std::lrint(std::clamp(r * gain, -1.0f, 1.0f) * 32767.0f));
+    }
     if (g_stream) SDL_PutAudioStreamData(g_stream, pcm, frames * 4);
     if (g_wav) {
         std::fwrite(pcm, 4, frames, g_wav);
@@ -859,6 +1066,10 @@ void frame_thread() {
                 std::fprintf(stderr, "[apu] frames %u idle %u voice-frames %u traps %u fectl %#x sectl %#x ists %#x ien %#x\n",
                              g_stat.frames, g_stat.idle_frames, g_stat.voices, g_stat.traps, reg(FECTL), reg(SECTL),
                              reg(ISTS), reg(IEN));
+                if (const int64_t n = g_traps_closed.exchange(0))
+                    std::fprintf(stderr, "[apu] traps open avg %.2f ms, max %.2f ms (%lld)\n",
+                                 double(g_trap_open_sum_ns.exchange(0)) / double(n) / 1e6,
+                                 double(g_trap_open_max_ns.exchange(0)) / 1e6, (long long)n);
                 g_stat = {};
                 std::fprintf(stderr, "[apu] dry rms %.4f, reverb rms %.4f, send rms %.4f\n",
                              std::sqrt(g_dry_energy / (96000.0 * 5)), std::sqrt(g_wet_energy / (96000.0 * 5)),
@@ -892,6 +1103,7 @@ uint32_t read(void*, uint32_t addr, unsigned size) {
     if (off < 0x20000) v = reg(off & ~3u) >> (8 * (off & 3));
     else v = g_other[off & ~3u] >> (8 * (off & 3));
     if (g_trace && g_seen.insert(off & ~3u).second) std::fprintf(stderr, "[apu] first read %#x -> %#x\n", off, v);
+    ring('R', off, v);
     return size == 4 ? v : v & ((1u << (8 * size)) - 1);
 }
 
@@ -899,11 +1111,18 @@ void write(void*, uint32_t addr, uint32_t v, unsigned size) {
     const uint32_t off = addr - kBase;
     std::lock_guard lk(g_m);
     if (g_trace && g_seen.insert(off & ~3u).second) std::fprintf(stderr, "[apu] first write %#x = %#x\n", off, v);
+    if (off < 0x20000 || off >= 0x30000) ring('W', off, v);
     if (off >= 0x20000 && off < 0x30000) {  // VP: FE methods
         fe_method(off - 0x20000, v);
         return;
     }
     if (off >= 0x20000) {
+        if (g_trace) {  // GP/EP DSP memory and registers: log changed words (first 400, then every 100th)
+            static unsigned n = 0;
+            const uint32_t old = g_other.count(off & ~3u) ? g_other[off & ~3u] : 0;
+            if (old != v && (++n <= 400 || n % 100 == 0))
+                std::fprintf(stderr, "[apu] dsp write %#x: %#x -> %#x (#%u)\n", off, old, v, n);
+        }
         uint32_t& r = g_other[off & ~3u];
         if (size == 4) r = v;
         else {
@@ -923,6 +1142,14 @@ void write(void*, uint32_t addr, uint32_t v, unsigned size) {
             break;
         case FECTL:
         case SECTL:
+            if (off == FECTL && (reg(FECTL) & FECTL_METHMODE) == FECTL_TRAPPED && (v & FECTL_METHMODE) != FECTL_TRAPPED) {
+                if (const int64_t t = g_trap_raised_ns.exchange(0, std::memory_order_relaxed)) {
+                    const int64_t d = now_ns() - t;
+                    g_trap_open_sum_ns += d;
+                    ++g_traps_closed;
+                    if (d > g_trap_open_max_ns.load(std::memory_order_relaxed)) g_trap_open_max_ns.store(d, std::memory_order_relaxed);
+                }
+            }
             reg(off) = v;
             update_irq();
             g_cv.notify_all();
@@ -965,6 +1192,7 @@ void init(bool play) {
     }
     for (uint32_t r = TVL2D; r <= 0x2074; r += 4) reg(r) = kNoVoice;
     if (const char* r = std::getenv("VC3_REVERB")) g_reverb_wet = std::strtof(r, nullptr);
+    stems_init();
     g_reverb.init(0.5f, 0.5f);
     mmio::register_range(kBase, kSize, "apu", read, write);
     aci::init();

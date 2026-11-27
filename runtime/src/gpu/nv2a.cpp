@@ -39,6 +39,9 @@
 
 namespace vc3::gpu {
 
+// VC3_FAST_UNTIL (testing): set when fast-forward should end early (VC3_FAST_STOP_FILE, kernel/io.cpp).
+std::atomic<bool> g_fast_stop{false};
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -501,7 +504,13 @@ void vblank_thread() {
         } else {
             period += (kPeriod - period) * 0.01;  // relax back to the nominal rate
         }
-        next += std::chrono::nanoseconds(s64(period));
+        // VC3_FAST_UNTIL=S (testing): run the game's frame clock VC3_FAST_FACTOR times
+        // faster (default 4) for its first S seconds of run time -- to reach a late scene in a
+        // scripted run quickly, then play it at normal speed.
+        static const double fast_until = std::getenv("VC3_FAST_UNTIL") ? std::atof(std::getenv("VC3_FAST_UNTIL")) : 0;
+        static const double fast_factor = std::getenv("VC3_FAST_FACTOR") ? std::max(1.0, std::atof(std::getenv("VC3_FAST_FACTOR"))) : 4.0;
+        const bool fast = fast_until > 0 && log::uptime() < fast_until && !g_fast_stop.load(std::memory_order_relaxed);
+        next += std::chrono::nanoseconds(s64(fast ? period / fast_factor : period));
         const auto now = Clock::now();
         if (now > next + std::chrono::milliseconds(50)) next = now;  // fell far behind: resync
         platform::sleep_until(next);

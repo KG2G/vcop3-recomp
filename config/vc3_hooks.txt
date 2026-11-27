@@ -5,3 +5,12 @@
 0x00077c20  # set the current stage: cheats (start at the final stage)
 0x000ae7c0  # mission select, per frame: cheats (final stage: no mission select)
 0x000a46a0  # a shot hits (called before its damage is read): VC3_TEST_ONEHIT
+0x0008ae90  # retired-object handler: stop a subway train's rumble if it is retired with it on
+0x00094e30  # subway train 2's update (Brand fight area, ambience channel 1)
+0x00094ff0  # subway train 1's update (ambience channel 2): skip pointless sound start/stop while far
+0x001123b0  # sound engine: select a DSP effects image: VC3_TRACE_SOUND
+0x0017e0e4  # DSOUND DownloadEffectsImage: VC3_TRACE_SOUND logs and saves the images
+0x0010e130  # sound engine: run a request: VC3_TRACE_SOUND
+0x0010dc10  # sound engine: post a request (cmd word): VC3_TRACE_SOUND logs who posts what
+0x001878c3  # DSOUND: voice release (VOICE_RELEASE): VC3_TRACE_APU logs who calls it
+0x00188ac3  # DSOUND: voice activate (VOICE_ON): VC3_TRACE_APU logs who calls it

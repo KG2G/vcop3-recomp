@@ -1117,8 +1117,12 @@ void close_hud_frame() {
             const TriBox &a = tris[i], &b = tris[j];
             // Side by side (small gap), overlapping rows, similar height: letters of a line,
             // not a thin bar beside a tall badge.
+            // Two wide panels are separate elements even when they nearly touch: the boss's
+            // life bar frame (centred) beside the score panel (top left) dragged the panel
+            // into the middle, while its digits still moved out.
             const float ha = a.y1 - a.y0, hb = b.y1 - b.y0;
-            if (a.x0 <= b.x1 + gap && b.x0 <= a.x1 + gap && a.y0 < b.y1 && b.y0 < a.y1 &&
+            const bool two_panels = a.x1 - a.x0 > 60.0f && b.x1 - b.x0 > 60.0f;
+            if (!two_panels && a.x0 <= b.x1 + gap && b.x0 <= a.x1 + gap && a.y0 < b.y1 && b.y0 < a.y1 &&
                 std::max(ha, hb) <= 2.0f * std::max(1.0f, std::min(ha, hb)))
                 parent[size_t(find(int(i)))] = find(int(j));
         }
@@ -1176,7 +1180,11 @@ int zone_side(float x0, float y0, float x1, float y1) {
     if (x1 - x0 > 400.0f) return 0;  // spans most of the screen: not a side panel
     // HUD panels sit against a screen edge or in the top/bottom bands; anything else drawn
     // with the HUD atlas (shot effects, the communication window) stays where it is.
-    if (!(x0 < 50.0f || x1 > 590.0f || y1 <= 72.0f || y0 >= 360.0f)) return 0;  // gauge bullets start at x 41; comm window at 58
+    // Under a top corner panel (down to y 112: the kill points and the shot names such as
+    // JUSTICE SHOT appear there) counts as that corner: decided by the band or by touching the
+    // edge, those texts flipped between moving and staying as they changed (jumping about).
+    const bool under_corner = y1 <= 112.0f && (x0 < 200.0f || x1 > 440.0f);
+    if (!(x0 < 50.0f || x1 > 590.0f || y1 <= 72.0f || y0 >= 360.0f || under_corner)) return 0;  // gauge bullets start at x 41; comm window at 58
     const float cx = (std::max(x0, 0.0f) + std::min(x1, 640.0f)) / 2;
     return cx < 320.0f - 48.0f ? -1 : cx > 320.0f + 48.0f ? 1 : 0;
 }
@@ -1302,9 +1310,14 @@ dev::Tex feedback_copy(dev::Tex src, const DrawState& d) {
     int x0 = 0, y0 = 0, x1 = g_cur_gw, y1 = g_cur_gh;
     if (d.fb_bounds) {
         // Guest pixels -> target texels (widescreen: the 4:3 picture sits in the middle).
-        const float off = float(g_cur_gw - g_cur_native_w * g_scale) / 2;
-        x0 = std::clamp(int(std::floor(off + d.fbx0 * float(g_scale))), 0, g_cur_gw);
-        x1 = std::clamp(int(std::ceil(off + d.fbx1 * float(g_scale))), 0, g_cur_gw);
+        // Distortion sprites spread across the whole width (see feedback_sprites) read
+        // the widened target with that same mapping: the copy must cover what they read,
+        // or near the sides they sample stale texels (hard-edged smears).
+        const bool spread = g_cur_wide < 1.0f && d.blend && !d.full_screen_2d;
+        const float off = spread ? 0.0f : float(g_cur_gw - g_cur_native_w * g_scale) / 2;
+        const float sx = spread ? float(g_cur_gw) / float(g_cur_native_w) : float(g_scale);
+        x0 = std::clamp(int(std::floor(off + d.fbx0 * sx)), 0, g_cur_gw);
+        x1 = std::clamp(int(std::ceil(off + d.fbx1 * sx)), 0, g_cur_gw);
         y0 = std::clamp(int(std::floor(d.fby0 * float(g_scale))), 0, g_cur_gh);
         y1 = std::clamp(int(std::ceil(d.fby1 * float(g_scale))), 0, g_cur_gh);
         if (x1 <= x0 || y1 <= y0) return g_fb_copy;
@@ -1465,7 +1478,16 @@ void setup_draw(const DrawState& d, dev::Program prog) {
     const bool screen_effect = copies_wide && !d.full_screen_2d &&
                                ((d.bx1 - d.bx0 >= float(d.surf.width) - 40.0f && d.by1 - d.by0 >= float(d.surf.height) - 40.0f) ||
                                 (d.big_mesh && no_bounds));
-    const bool full_read = (stretch && (g_cur_wide < 1.0f || copies_wide)) || screen_effect;
+    // Distortion sprites that sample the picture they draw into (the heat haze at the GALE
+    // fight: ~190-pixel squares offset by a small noise texture, scattered over the 640-wide
+    // view): spread across the whole width with the same mapping as their reads of the
+    // widened picture, so the haze covers the widescreen sides too instead of only the
+    // 4:3 middle (with a seam where it ended).
+    bool reads_itself = false;
+    for (int i = 0; i < 4; ++i)
+        reads_itself |= tex_wide[i] < 1.0f && d.tex[i].base == d.surf.color_base;
+    const bool feedback_sprites = g_cur_wide < 1.0f && reads_itself && d.blend && !d.full_screen_2d;
+    const bool full_read = (stretch && (g_cur_wide < 1.0f || copies_wide)) || screen_effect || feedback_sprites;
     u.wide = full_read ? -1.0f : g_cur_wide;
     const bool hud = g_cur_wide < 1.0f && !stretch && d.surf.width == 640 && d.surf.height == 480 && hud_enabled(d);
     // 2D that the game keeps off-screen in 4:3 (pieces of an animation waiting to slide

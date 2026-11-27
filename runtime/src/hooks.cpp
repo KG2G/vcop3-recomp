@@ -1,5 +1,11 @@
 // Hooks into lifted guest functions (see config/vc3_hooks.txt).
+#include <atomic>
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
+#include <map>
+#include <set>
+#include <string>
 #include <cstring>
 #include <cstdio>
 #include <filesystem>
@@ -15,6 +21,8 @@
 #include "gpu/gl_backend.h"
 
 namespace vc3 {
+
+namespace gpu { extern std::atomic<bool> g_fast_stop; }
 
 // Free play (VC3_FREEPLAY=1). The game's credit library keeps its coin settings in a
 // 32-byte block at 0x55FB18; byte 7 = 1 is free play (checked when starting and continuing;
@@ -140,8 +148,21 @@ void cheats() {
 }
 }  // namespace
 
+// Section skipping (testing) is not done yet: requesting the game's GameSceneClear state
+// mid-section left it in an empty room without HUD. request_scene_skip() is a no-op for now.
+void request_scene_skip() {}
+
+std::atomic<unsigned long> g_vblanks{0};  // per_vblank calls (for logs)
+
 void per_vblank() {
+    g_vblanks.fetch_add(1, std::memory_order_relaxed);
     cheats();
+    // VC3_FAST_STOP_FRAME=N (testing): end VC3_FAST_UNTIL's fast-forward once the game has
+    // been N frames in the current stage ([0x3DDC60]) with someone playing.
+    static const long fast_stop_frame = cheat_setting("VC3_FAST_STOP_FRAME");
+    if (fast_stop_frame > 0 && (player_in_game(0) || player_in_game(1)) &&
+        rd<int32_t>(0x003DDC60) >= fast_stop_frame && !gpu::g_fast_stop.exchange(true))
+        std::fprintf(stderr, "[dev] %.0f s: stage frame %d, normal speed from here\n", log::uptime(), rd<int32_t>(0x003DDC60));
     // VC3_RAM_DUMP=N,N,...: save guest RAM 0-16 MiB at those vblanks to work/ramdump/N.bin (dev).
     static const char* dump = std::getenv("VC3_RAM_DUMP");
     static unsigned long vb = 0;
@@ -232,6 +253,89 @@ bool player_in_game(int p) {
     return st == 2 || st == 8;
 }
 
+// ---- The subway trains in the Brand fight area (mission 1, section 0x0E). Each has its own update:
+// fn_00094ff0 (ambience channel 2) and fn_00094e30 (channel 1, from section frame 1570 on). Each frame
+// it starts its rumble when its "sound on" flag (0x4000) is clear (fn_000b2a80(ch, 1)), then stops it
+// again (fn_000b2a80(ch, 0), flag cleared) if the nearest car (fn_0008d9a0: the car closest to the
+// camera, if one is within 1000) is over 127 away. Two things go wrong with that:
+// - While the train is far, that is a start and a stop every frame: each pair allocates and frees a
+//   DSOUND voice (~0.5 ms of the single guest CPU, 60 times a second), and a pair just before the real
+//   start can strand that start's voice (see train_update). The hook marks the sound as on while the
+//   train is out of range, so the game skips the start; its own range check then clears the flag and
+//   posts a stop that finds nothing playing. In range nothing changes.
+// - A train is retired (handler 0x8AE90) the frame it passes x 650 -- fn_00094e30 at once, fn_00094ff0
+//   after 3000 section frames -- without clearing the sound flag or stopping the sound. If it is still
+//   in range then, nothing ever turns the rumble off: it looped through the whole Brand fight and the
+//   ending in every run (a hardware recording has no rumble there). The retired handler's hook sends the
+//   game's own stop for that train's channel. (Likewise if the section ends with a train's sound on.)
+// VC3_TRAIN_FIX=0 turns all of it off.
+namespace {
+struct Train { uint32_t obj; int channel; uint32_t entry; };
+Train g_trains[2] = {{0, 2, 0x00094ff0}, {0, 1, 0x00094e30}};
+
+bool train_fix_off() {
+    static const bool off = std::getenv("VC3_TRAIN_FIX") && std::getenv("VC3_TRAIN_FIX")[0] == '0';
+    return off;
+}
+
+// The game's "ambience channel off" (fn_000b2a80(channel, 0), cdecl) for a train whose sound is on.
+void train_sound_off(Cpu& c, const Train& t, uint32_t ret_addr, const char* why) {
+    wr<uint32_t>(t.obj, rd<uint32_t>(t.obj) & ~0x4000u);
+    const Cpu saved = c;
+    push32(c, 0);
+    push32(c, uint32_t(t.channel));
+    call_indirect(c, 0x000b2a80, ret_addr);
+    c = saved;
+    std::fprintf(stderr, "[sound] %.0f s: subway train (channel %d) %s with its rumble on: rumble stopped\n", log::uptime(),
+                 t.channel, why);
+}
+
+void train_update(Cpu& c, int which) {
+    if (train_fix_off()) return;
+    Train& t = g_trains[which];
+    const uint32_t train = rd<uint32_t>(c.esp + 4), es = rd<uint32_t>(0x003F3FEC);
+    if (train < 0x10000 || train >= mem::kRamSize - 0x100 || !es) return;
+    t.obj = train;
+    const uint32_t flags = rd<uint32_t>(train);
+    if (std::getenv("VC3_TRACE_SOUND")) {  // (dev) each train's sound flag as the update sees it
+        static uint32_t last[2] = {0, 0};
+        if ((flags ^ last[which]) & 0x4000u)
+            std::fprintf(stderr, "[train] vblank %lu: train %d (channel %d) sound %s, x %.1f, section frame %d\n",
+                         g_vblanks.load(std::memory_order_relaxed), which + 1, t.channel, flags & 0x4000 ? "on" : "off",
+                         rd<float>(train + 0x80), rd<int32_t>(es + 0x18));
+        last[which] = flags;
+    }
+    if (rd<int32_t>(es + 0x24) != 0x0E) {  // the update returns at once outside its section
+        if (flags & 0x4000) train_sound_off(c, t, t.entry, "left behind");
+        return;
+    }
+    if (flags & 0x4000) return;
+    const uint32_t cam = rd<uint32_t>(0x003A5254) + 8;
+    const double cx = rd<float>(cam), cy = rd<float>(cam + 4), cz = rd<float>(cam + 8);
+    double nearest = 1e30;
+    uint32_t node = rd<uint32_t>(rd<uint32_t>(train + 0x6C));
+    for (int i = 0, n = rd<uint8_t>(train + 0x58); i < n && node >= 0x10000 && node < mem::kRamSize - 0x100; ++i) {
+        const double dx = rd<float>(node + 0xA4) - cx, dy = rd<float>(node + 0xA8) - cy, dz = rd<float>(node + 0xAC) - cz;
+        nearest = std::min(nearest, std::sqrt(dx * dx + dy * dy + dz * dz));
+        node = rd<uint32_t>(node);
+    }
+    // Exactly the game's threshold, without a margin: start/stop pairs left in the frames just before
+    // the train comes in range made the real start collide with the previous pair's release (DSOUND
+    // then took the new voice's buffer for stopped when the old voice went idle, the sound engine
+    // freed its slot, and nothing could stop that rumble any more: one stray copy per pass, heard as
+    // hiss up to the results screen). Beyond 1000 (where the game's routine returns stale data) the
+    // start is skipped too; the game then starts it when a car is really in range.
+    if (nearest > 127.0) wr<uint32_t>(train, flags | 0x4000);
+}
+
+void train_retired(Cpu& c) {
+    if (train_fix_off()) return;
+    const uint32_t obj = rd<uint32_t>(c.esp + 4);
+    for (const Train& t : g_trains)
+        if (t.obj && obj == t.obj && (rd<uint32_t>(obj) & 0x4000)) train_sound_off(c, t, 0x0008ae90, "retired");
+}
+}  // namespace
+
 void guest_hook(Cpu& c, uint32_t entry) {
     switch (entry) {
         case 0x000398c0: {
@@ -255,6 +359,13 @@ void guest_hook(Cpu& c, uint32_t entry) {
             // hit can do, 127 -- every enemy at once, bosses in a few bullets.
             static const bool onehit = std::getenv("VC3_TEST_ONEHIT") != nullptr;
             const uint32_t shot = rd<uint32_t>(c.esp + 4);
+            if (std::getenv("VC3_TRACE_ENEMIES")) {  // (dev) which objects get hit
+                static std::set<uint32_t> seen;
+                if (seen.insert(c.esi).second)
+                    std::fprintf(stderr, "[enemy] hit object %08x hp %d flag156 %d shot %08x\n", c.esi,
+                                 c.esi < mem::kRamSize - 0x200 ? rd<int32_t>(c.esi + 0x140) : 0,
+                                 c.esi < mem::kRamSize - 0x200 ? rd<uint8_t>(c.esi + 0x156) : 0, shot);
+            }
             if (onehit && shot) {
                 wr<int8_t>(shot + 0x6278, 127);
                 // Bosses have more health than that: the enemy being hit is in the caller's esi,
@@ -285,6 +396,11 @@ void guest_hook(Cpu& c, uint32_t entry) {
             // at 0x1E4DC0: 0, 1, 2 the three missions, 3 the final stage (fld_stage4a); 9 the
             // attract demo.
             static const bool final_stage = cheat_setting("VC3_CHEAT_FINAL") != 0;
+            // VC3_DEV_STAGE=n (testing): play stage n (0-3) whichever mission card is picked.
+            if (const char* ds = std::getenv("VC3_DEV_STAGE"); ds && *ds) {
+                const int32_t st = rd<int32_t>(c.esp + 4);
+                if (st >= 0 && st <= 3 && (player_in_game(0) || player_in_game(1))) wr<int32_t>(c.esp + 4, std::atoi(ds));
+            }
             const int32_t stage = rd<int32_t>(c.esp + 4);
             if (final_stage && stage >= 0 && stage <= 2 && (player_in_game(0) || player_in_game(1))) {
                 wr<int32_t>(c.esp + 4, 3);
@@ -296,6 +412,85 @@ void guest_hook(Cpu& c, uint32_t entry) {
                 std::fprintf(stderr, "[game] %.0f s: %s\n", log::uptime(),
                              s >= 0 && s <= 3 ? kNames[s] : s == 9 ? "attract demo" : "stage");
             }
+            break;
+        }
+        case 0x00094ff0: train_update(c, 0); break;  // the subway trains (Brand fight area), see above
+        case 0x00094e30: train_update(c, 1); break;
+        case 0x001123b0:  // the sound engine picks a DSP effects image (bank, index) -- VC3_TRACE_SOUND
+            if (std::getenv("VC3_TRACE_SOUND"))
+                std::fprintf(stderr, "[sound] vblank %lu sf %d: effects image select %u %u\n", g_vblanks.load(std::memory_order_relaxed),
+                             rd<int32_t>(0x003DDC60), rd<uint8_t>(c.esp + 4), rd<uint8_t>(c.esp + 8));
+            break;
+        case 0x0017e0e4: {  // DSOUND DownloadEffectsImage(ds, image, size, loc, desc) -- VC3_TRACE_SOUND saves each image
+            if (!std::getenv("VC3_TRACE_SOUND")) break;
+            const uint32_t img = rd<uint32_t>(c.esp + 8), size = rd<uint32_t>(c.esp + 12);
+            uint64_t h = 1469598103934665603ull;
+            for (uint32_t i = 0; i < size && size < (8u << 20); ++i) h = (h ^ rd<uint8_t>(img + i)) * 1099511628211ull;
+            std::fprintf(stderr, "[sound] vblank %lu: DownloadEffectsImage %08x size %u hash %016llx\n",
+                         g_vblanks.load(std::memory_order_relaxed), img, size, (unsigned long long)h);
+            char name[96];
+            std::snprintf(name, sizeof name, "work/dsp_images/%016llx.bin", (unsigned long long)h);
+            std::filesystem::create_directories("work/dsp_images");
+            if (!std::filesystem::exists(name) && size < (8u << 20))
+                if (std::FILE* f = std::fopen(name, "wb")) {
+                    std::fwrite(host_ptr(img), 1, size, f);
+                    std::fclose(f);
+                }
+            break;
+        }
+        case 0x0008ae90:  // an object's "retired" update handler ([esp+4]: the object)
+            train_retired(c);
+            break;
+        case 0x0010e130: {  // the sound thread runs a request (cmd word in [esp+4]) -- VC3_TRACE_SOUND
+            static const bool trace = std::getenv("VC3_TRACE_SOUND") != nullptr;
+            if (!trace) break;
+            const uint32_t cmd = rd<uint32_t>(c.esp + 4);
+            static std::map<uint32_t, int> seen;
+            const int n = ++seen[cmd];
+            if (n <= 3 || n % 300 == 0)
+                std::fprintf(stderr, "[sound] vblank %lu: run %08x from %06x (x%d)\n", g_vblanks.load(std::memory_order_relaxed),
+                             cmd, rd<uint32_t>(c.esp), n);
+            break;
+        }
+        case 0x0010dc10: {  // the sound engine's request post (cmd word in [esp+4]) -- VC3_TRACE_SOUND
+            static const bool trace = std::getenv("VC3_TRACE_SOUND") != nullptr;
+            if (!trace) break;
+            const uint32_t cmd = rd<uint32_t>(c.esp + 4);
+            static std::map<std::string, int> seen;
+            char b[48];
+            std::snprintf(b, sizeof b, "cmd %08x from", cmd);
+            std::string key = b;
+            for (uint32_t i = 0, n = 0; i < 64 && n < 6; ++i) {  // return addresses on the guest stack
+                const uint32_t w = rd<uint32_t>(c.esp + 4 * i);
+                if (w >= 0x00011000u && w < 0x001B3000u) {
+                    std::snprintf(b, sizeof b, " %06x", w);
+                    key += b;
+                    ++n;
+                }
+            }
+            const int n = ++seen[key];
+            if (n <= 3 || n % 300 == 0)
+                std::fprintf(stderr, "[sound] vblank %lu sf %d: %s (x%d)\n", g_vblanks.load(std::memory_order_relaxed), rd<int32_t>(0x003DDC60), key.c_str(), n);
+            break;
+        }
+        case 0x001878c3:    // DSOUND voice release / voice activate: who calls them (sound tracing)
+        case 0x00188ac3: {
+            static const bool trace = std::getenv("VC3_TRACE_APU") != nullptr;
+            if (!trace) break;
+            static std::map<std::string, int> seen;
+            std::string chain;
+            for (uint32_t i = 0, n = 0; i < 96 && n < 10; ++i) {  // return addresses on the guest stack
+                const uint32_t w = rd<uint32_t>(c.esp + 4 * i);
+                if (w >= 0x00011000u && w < 0x001B3000u) {
+                    char b[12];
+                    std::snprintf(b, sizeof b, " %06x", w);
+                    chain += b;
+                    ++n;
+                }
+            }
+            if (++seen[chain] <= 3 || seen[chain] % 500 == 0)
+                std::fprintf(stderr, "[dsound] %s called from:%s (x%d)\n", entry == 0x001878c3 ? "release" : "activate",
+                             chain.c_str(), seen[chain]);
             break;
         }
         default: break;
