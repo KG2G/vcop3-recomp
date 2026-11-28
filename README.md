@@ -90,6 +90,17 @@ step 2 done).
 The Windows build renders with Vulkan by default (any current NVIDIA, AMD or Intel driver) or
 OpenGL 4.5, and needs Windows 10 version 1803 or newer.
 
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE): fork it, mod it, share it, build on it -- freely, for any
+non-commercial purpose. Selling it, or using it to make money, is not allowed: Virtua Cop 3 belongs
+to Sega, and this project isn't something to profit from. When you pass it on, include the licence
+(or its link) and the `Required Notice` line at the top of it.
+
+That covers this project's source only. Virtua Cop 3 itself belongs to Sega (you supply your own
+dump; nothing of the game is in this repository), and the third-party libraries below keep their
+own licences (all permissive: MIT, BSD, zlib, Apache 2.0, public domain).
+
 ## Third-party code
 
 Fetched at build time: Zydis, Dear ImGui, miniz, libchdr, stb_image (Sean Barrett, public domain:
