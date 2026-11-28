@@ -18,5 +18,9 @@ namespace vc3::audio::apu {
 void init(bool play);
 // Stops the mixing thread and closes the audio device (before SDL_Quit).
 void shutdown();
+// The pause menu: no sound is made while paused (what was queued is dropped).
+void set_paused(bool paused);
+// Output volume (1 = 100%), live.
+void set_volume(float v);
 
 }  // namespace vc3::audio::apu

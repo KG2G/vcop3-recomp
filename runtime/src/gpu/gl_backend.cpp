@@ -1226,6 +1226,7 @@ int32_t g_hud_base = 0;
 // must stay put (the mission-select cursor follows the aim), and cutscene text (drawn
 // with the score font) is better left where it is.
 constexpr u64 kHudAtlas = 0x015263d3d78cc80aull;
+constexpr u64 kAmmoSheet = 0x2f811f12202e0fabull;  // ammo gauge bullets (also the communication window's decorations)
 u64 g_score_seen_epoch = ~0ull;  // last frame the gameplay HUD's score panel was drawn
 
 // The HUD atlas also holds the shot sparks (frames in u 0.7..1 x v 0.375..0.5 and
@@ -1242,6 +1243,27 @@ std::vector<RecentSpark> g_recent_sparks;
 RecentSpark g_mag_fall{0, 0, 0};  // where/when the magazine last started falling out
 
 bool hud_enabled(const DrawState& d) {
+    // VC3_TRACE_HUD_TEX=1 (testing): each texture drawn flat in 2D during gameplay, with where (up to 12
+    // places per texture) -- to find HUD pieces missing from kHudTextures.
+    if (static const bool tr = std::getenv("VC3_TRACE_HUD_TEX") != nullptr;
+        tr && !d.full_screen_2d && d.flat2d && !g_draw_tris.empty() && g_score_seen_epoch != ~0ull && g_score_seen_epoch + 1 >= g_epoch) {
+        // =top: every distinct (texture, place) in the top band, once each (a boss's bar and name).
+        static const bool top = !std::strcmp(std::getenv("VC3_TRACE_HUD_TEX"), "top");
+        static std::map<u64, int> seen;
+        static std::set<std::pair<u64, BoxKey>> seen_top;
+        TriBox bb = g_draw_tris[0];
+        for (const TriBox& b : g_draw_tris) {
+            bb.x0 = std::min(bb.x0, b.x0); bb.y0 = std::min(bb.y0, b.y0);
+            bb.x1 = std::max(bb.x1, b.x1); bb.y1 = std::max(bb.y1, b.y1);
+        }
+        const bool log_it = top ? bb.y1 < 140.0f && seen_top.size() < 5000 && seen_top.insert({g_draw_tex0_hash, box_key(bb)}).second
+                                : seen[g_draw_tex0_hash]++ < 12;
+        if (log_it) {
+            std::fprintf(stderr, "[hudtex] %016llx %s frame %llu box %.0f,%.0f-%.0f,%.0f (%zu tris)\n",
+                         (unsigned long long)g_draw_tex0_hash, hud_texture(g_draw_tex0_hash) ? "HUD  " : "other",
+                         (unsigned long long)g_epoch, bb.x0, bb.y0, bb.x1, bb.y1, g_draw_tris.size());
+        }
+    }
     if (!g_wide_hud || d.full_screen_2d || !d.flat2d || g_draw_tris.empty() || !hud_texture(g_draw_tex0_hash)) return false;
     if (g_draw_tex0_hash == kHudAtlas)
         for (const TriBox& b : g_draw_tris)  // the score panel frame: ~190 px wide, in a top corner
@@ -1251,7 +1273,11 @@ bool hud_enabled(const DrawState& d) {
         close_hud_frame();
         g_hud_frame = g_epoch;
     }
-    g_hud_sides.assign(g_draw_vertices, 0.0f);
+    // Default: stay and be clipped to the 4:3 part like other 2D (2). Only pieces moving out to an
+    // edge (-1 / 1) and sparks of a shot into a side area (0) may be drawn in the side areas: a piece
+    // left at 0 was drawn there unclipped -- the communication window's parts the game parks just off
+    // its 4:3 screen showed in the side area (with widescreen shooting).
+    g_hud_sides.assign(g_draw_vertices, 2.0f);
     bool any = false;
     const bool atlas_draw = g_draw_tex0_hash == kHudAtlas;
     for (size_t t = 0; t < g_draw_tris.size(); ++t) {
@@ -1298,11 +1324,27 @@ bool hud_enabled(const DrawState& d) {
         if (side && in_centre_area(b)) side = 0;  // inside a centred element (the life bar's fill)
         if ((magazine || mag_bullet) && it == g_hud_prev_side.end()) side = g_mag_fall.x < 320.0f ? -1 : 1;  // falls with its panel
         // The atlas also holds the shot spark: only learned panel parts move.
-        if (spark) {  // stays where it landed, clipped to the 4:3 part like other 2D
-            for (int k = 0; k < 3; ++k) g_hud_sides[g_draw_corners[3 * t + size_t(k)]] = 2.0f;
+        if (spark) {  // stays where it landed, clipped to the 4:3 part like other 2D -- unless it
+                      // landed in a widescreen side area (a shot there: widescreen shooting)
+            // Only a spark at a gun aimed into a side area: other atlas pieces counted as sparks (the
+            // communication window's, parked off-screen while it animates) stay clipped to the 4:3 part.
+            const float sx = (b.x0 + b.x1) / 2, sy = (b.y0 + b.y1) / 2;
+            bool side_aim = false;
+            if (sx < 0.0f || sx > 640.0f)
+                for (int gun = 0; gun < 2 && !side_aim; ++gun) {
+                    float ax, ay;
+                    vc3::io::aim_point(gun, ax, ay);
+                    side_aim = (ax < 0.0f || ax > 640.0f) && std::fabs(ax - sx) <= 64.0f && std::fabs(ay - sy) <= 64.0f;
+                }
+            const float s = side_aim ? 0.0f : 2.0f;
+            for (int k = 0; k < 3; ++k) g_hud_sides[g_draw_corners[3 * t + size_t(k)]] = s;
             any = true;
             continue;
         }
+        // The ammo-gauge sheet's HUD use is the gauge (low on the left / right); in the upper half its
+        // pieces are the communication window's (header bracket, stripes), which sits in the top-left band
+        // like the score panel: those were taken for HUD and moved to the edge. They stay (clipped).
+        if (side && g_draw_tex0_hash == kAmmoSheet && b.y1 < 240.0f) side = 0;
         if (!side) continue;
         any = true;
         for (int k = 0; k < 3; ++k) g_hud_sides[g_draw_corners[3 * t + size_t(k)]] = float(side);
@@ -1515,16 +1557,31 @@ void setup_draw(const DrawState& d, dev::Program prog) {
     // Shot effects (sparks, glows, streaks) are spawned where the gun is aimed; at the 4:3
     // edge they would spill into the widescreen sides. Small blended 3D effects drawn over a
     // gun's aim point are clipped to the 4:3 part like 2D.
-    bool shot_effect = false;
-    if (g_cur_wide < 1.0f && d.blend && !d.flat2d && d.bx1 > d.bx0 && d.bx1 - d.bx0 < 260.0f && d.by1 - d.by0 < 260.0f &&
-        d.surf.width == 640) {
-        for (int gun = 0; gun < 2 && !shot_effect; ++gun) {
+    // A gun aimed into a widescreen side area shoots there (widescreen shooting): what's drawn at
+    // that aim point -- sparks (2D), glows and streaks (3D) -- is shown there, not clipped.
+    bool shot_effect = false, side_shot = false;
+    if (g_cur_wide < 1.0f && d.bx1 > d.bx0 && d.bx1 - d.bx0 < 260.0f && d.by1 - d.by0 < 260.0f && d.surf.width == 640) {
+        for (int gun = 0; gun < 2; ++gun) {
             float ax, ay;
             vc3::io::aim_point(gun, ax, ay);
-            shot_effect = ax >= d.bx0 - 16 && ax <= d.bx1 + 16 && ay >= d.by0 - 16 && ay <= d.by1 + 16;
+            const bool at_aim = ax >= d.bx0 - 16 && ax <= d.bx1 + 16 && ay >= d.by0 - 16 && ay <= d.by1 + 16;
+            if (!at_aim) continue;
+            if (ax < 0.0f || ax > 640.0f) side_shot = true;
+            else if (d.blend && !d.flat2d) shot_effect = true;
         }
     }
-    if (g_cur_wide < 1.0f && ((d.flat2d && !full_read && !hud) || shot_effect)) {
+    if (static const bool tc = std::getenv("VC3_TRACE_CLIP") != nullptr; tc && g_cur_wide < 1.0f && d.bx0 < 0.0f && d.by0 < 140.0f && g_epoch >= 1000 && d.bx1 - d.bx0 < 600.0f) {
+        static int n = 0;
+        if (n++ < 300) {
+            float a0x, a0y, a1x, a1y;
+            vc3::io::aim_point(0, a0x, a0y);
+            vc3::io::aim_point(1, a1x, a1y);
+            std::fprintf(stderr, "[clip] epoch %llu flat %d blend %d box %.0f,%.0f-%.0f,%.0f full_read %d hud %d side_shot %d shot_effect %d stretch %d tex %016llx aims %.0f,%.0f %.0f,%.0f\n",
+                         (unsigned long long)g_epoch, d.flat2d, d.blend, d.bx0, d.by0, d.bx1, d.by1, full_read, hud, side_shot, shot_effect, stretch,
+                         (unsigned long long)g_draw_tex0_hash, a0x, a0y, a1x, a1y);
+        }
+    }
+    if (g_cur_wide < 1.0f && ((d.flat2d && !full_read && !hud) || shot_effect) && !side_shot) {
         rs.scissor = true;
         rs.sx = (g_cur_gw - g_cur_native_w * g_scale) / 2;
         rs.sy = 0;
@@ -2622,6 +2679,7 @@ void shader_warmup_progress(int& done, int& total) { done = dev::shader_store::w
 
 void shader_stats(u64& n, u64& ns) { n = dev::shader_store::compile_n.load(); ns = dev::shader_store::compile_ns.load(); }
 
+void set_wide_hud(bool on) { g_wide_hud = on; }
 u64 ram_writes() { return g_ram_writes.load(std::memory_order_acquire); }
 std::mutex& ram_write_mutex() { return g_ram_write_m; }
 

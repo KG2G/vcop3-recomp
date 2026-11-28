@@ -1009,6 +1009,7 @@ void output(const float* buf, int frames) {
 }
 
 std::atomic<bool> g_quit{false}, g_thread_done{false};
+std::atomic<bool> g_paused{false};  // the pause menu
 void frame_thread() {
     constexpr auto kChunk = std::chrono::microseconds(1000000 * kFrame * kFramesPerChunk / 48000);
     auto next = Clock::now();
@@ -1021,6 +1022,11 @@ void frame_thread() {
         if (g_quit.load()) {
             g_thread_done = true;
             return;
+        }
+        if (g_paused.load(std::memory_order_relaxed)) {  // the pause menu: the voices stand still
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            next = Clock::now();
+            continue;
         }
         if (g_stream) {
             if (SDL_GetAudioStreamQueued(g_stream) >= kTargetQueued) {
@@ -1170,6 +1176,12 @@ void write(void*, uint32_t addr, uint32_t v, unsigned size) {
 }
 
 }  // namespace
+
+void set_paused(bool paused) {
+    g_paused = paused;
+    if (paused && g_stream) SDL_ClearAudioStream(g_stream);  // silence now, not after the queued 50 ms
+}
+void set_volume(float v) { g_volume = v; }
 
 void init(bool play) {
     g_trace = std::getenv("VC3_TRACE_APU") != nullptr;

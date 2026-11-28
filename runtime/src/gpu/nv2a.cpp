@@ -29,6 +29,8 @@
 #include "gpu/device.h"
 #include "io/input.h"
 #include "platform.h"
+#include "pause.h"
+#include "pause_menu.h"
 #include "gpu/crosshair_image.h"
 #include "io/jvs.h"
 #include "kernel/ke.h"
@@ -507,6 +509,11 @@ void vblank_thread() {
     auto next = Clock::now();
     u64 seen_reports = 0;
     for (;;) {
+        if (pause::active()) {  // the pause menu: no vblanks (the game stands still)
+            platform::sleep_for(std::chrono::milliseconds(5));
+            next = Clock::now();
+            continue;
+        }
         // Phase-locked loop: steer the tick to fall halfway between two display refreshes.
         if (g_vs_locked.load(std::memory_order_relaxed)) {
             const u64 r = g_vs_reports.load(std::memory_order_acquire);
@@ -728,6 +735,9 @@ namespace {
 // Display refresh state, updated about once a second from the window's display.
 SDL_Window* g_window = nullptr;
 bool g_vsync = true;
+// VC3_CROSSHAIR=on|off and VC3_CROSSHAIR_SIZE (1 = 100%) at start; set_crosshair while playing.
+std::atomic<int> g_crosshair_on{-1};  // -1: from the environment
+std::atomic<float> g_crosshair_size{-1.0f};
 double g_refresh = 0;  // Hz
 int g_vs_k = 0;        // refreshes per guest vblank if lockable, else 0
 bool g_present_blocks = false;  // presents wait for vsync
@@ -913,6 +923,8 @@ bool surface_resets() {
 #endif
 }
 
+bool g_borderless_fs = false;  // the borderless "fullscreen" window is up (Windows)
+
 void toggle_fullscreen() {
     if (!g_window) return;
     // Vulkan, real fullscreen: start afresh once the window has its new size (see vkp::reset_surface).
@@ -934,6 +946,7 @@ void toggle_fullscreen() {
     static SDL_Rect saved{};
     if (borderless) {
         borderless = false;
+        g_borderless_fs = false;
         SDL_SetWindowBordered(g_window, true);
         SDL_SetWindowPosition(g_window, saved.x, saved.y);
         SDL_SetWindowSize(g_window, saved.w, saved.h);
@@ -966,6 +979,7 @@ void toggle_fullscreen() {
         SDL_GetWindowPosition(g_window, &saved.x, &saved.y);
         SDL_GetWindowSize(g_window, &saved.w, &saved.h);
         borderless = true;
+        g_borderless_fs = true;
         SDL_SetWindowBordered(g_window, false);
         SDL_SetWindowPosition(g_window, b.x, b.y);
         SDL_SetWindowSize(g_window, b.w, b.h + 1);
@@ -989,6 +1003,17 @@ void toggle_fullscreen() {
     reset_surface_soon();
     if (best) std::fprintf(stderr, "[present] fullscreen mode %dx%d @ %.2f Hz\n", best->w, best->h, double(best->refresh_rate));
     SDL_free(modes);
+}
+
+bool fullscreen_on() { return g_window && (g_borderless_fs || (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN)); }
+void set_vsync(bool on) {
+    g_vsync = on;
+    g_refresh = -1;  // re-decide everything that depends on it (update_display_mode)
+    update_display_mode();
+}
+void set_crosshair(bool on, float size) {
+    g_crosshair_on = on;
+    g_crosshair_size = std::clamp(size > 0 ? size : 1.0f, 0.25f, 4.0f);
 }
 
 namespace {
@@ -1073,15 +1098,16 @@ using dev::OverlayRect;
 using dev::OverlayImage;
 std::vector<OverlayRect> crosshair_rects(int wh, float x, float y, float pw, float ph, std::vector<OverlayImage>& images) {
     std::vector<OverlayRect> out;
-    static const std::string mode = std::getenv("VC3_CROSSHAIR") ? std::getenv("VC3_CROSSHAIR") : "on";
-    if (mode == "off") return out;
-    const float gw = std::min(pw, ph * 4.0f / 3.0f), gx0 = x + (pw - gw) / 2;
-    // VC3_CROSSHAIR_SIZE: scale (1 = 100%).
-    static const float size = [] {
+    if (g_crosshair_on < 0) {
+        const char* m = std::getenv("VC3_CROSSHAIR");
+        g_crosshair_on = !(m && !std::strcmp(m, "off"));
         const char* e = std::getenv("VC3_CROSSHAIR_SIZE");
         const float v = e ? float(std::atof(e)) : 1.0f;
-        return std::clamp(v > 0 ? v : 1.0f, 0.25f, 4.0f);
-    }();
+        g_crosshair_size = std::clamp(v > 0 ? v : 1.0f, 0.25f, 4.0f);
+    }
+    if (!g_crosshair_on || pause::active()) return out;  // (none over the pause menu)
+    const float gw = std::min(pw, ph * 4.0f / 3.0f), gx0 = x + (pw - gw) / 2;
+    const float size = g_crosshair_size.load();
     // 100%: 5% of the window height across (the screen's height when fullscreen).
     const float s = float(wh) * size;
     const int arm = std::max(3, int(s * 0.0183f + 0.5f)), th = std::max(2, int(s * 0.0045f + 0.5f)),
@@ -1113,6 +1139,7 @@ std::vector<OverlayRect> crosshair_rects(int wh, float x, float y, float pw, flo
 // moves the system mouse over the whole screen, which maps to the game like any mouse.
 std::vector<OverlayRect> overlay_rects(int w, int h, float x, float y, float pw, float ph, std::vector<OverlayImage>& images) {
     std::vector<OverlayRect> out = crosshair_rects(h, x, y, pw, ph, images);
+    if (const OverlayImage* menu = pause_menu::image()) images.push_back(*menu);  // the pause menu, over everything
     static const float pct = [] {
         const char* e = std::getenv("VC3_SINDEN_BORDER");
         const float v = e ? float(std::atof(e)) : 0.0f;
@@ -1154,11 +1181,11 @@ void draw_picture() {
     glDisable(GL_SCISSOR_TEST);
     // Custom crosshair images: uploaded once per change, then each run of drawn pixels in a row
     // copied 1:1 into the window (no blending: see crosshair_image.h).
-    static GLuint tex[2] = {};
-    static int tex_w[2] = {}, tex_h[2] = {};
-    static uint64_t tex_version[2] = {};
+    static GLuint tex[3] = {};
+    static int tex_w[3] = {}, tex_h[3] = {};
+    static uint64_t tex_version[3] = {};
     for (const OverlayImage& im : images) {
-        const int sl = im.slot & 1;
+        const int sl = im.slot % 3;  // crosshairs 0/1, the pause menu 2
         if (!tex[sl] || tex_w[sl] != im.w || tex_h[sl] != im.h) {
             if (tex[sl]) glDeleteTextures(1, &tex[sl]);
             glCreateTextures(GL_TEXTURE_2D, 1, &tex[sl]);
@@ -1298,7 +1325,7 @@ bool present() {
     const u64 seq = g_display_seq.load(std::memory_order_acquire);
     const bool fresh = seq != shown_seq;
     choose_pacing();
-    if ((!g_vs_k || g_fresh_only) && !fresh && now - last_present < std::chrono::milliseconds(100)) return false;
+    if ((!g_vs_k || g_fresh_only) && !fresh && !pause::active() && now - last_present < std::chrono::milliseconds(100)) return false;
     last_present = now;
     static u64 uploads = 0, skipped = 0;
     static const bool tp = std::getenv("VC3_TRACE_PRESENT") != nullptr;

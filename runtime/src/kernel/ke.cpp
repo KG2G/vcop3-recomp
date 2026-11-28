@@ -3,6 +3,7 @@
 #include "ke.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -42,6 +43,11 @@ const bool g_lat_trace = std::getenv("VC3_TRACE_SCHED") != nullptr;
 std::map<u32, Clock::time_point> g_timers;  // KTIMER -> due
 std::map<u32, u32> g_interrupts;            // vector -> KINTERRUPT
 const Clock::time_point g_boot = Clock::now();
+// Pause menu (pause_clock): time spent paused, kept out of the guest's clocks.
+std::atomic<int64_t> g_paused_total_ns{0}, g_pause_began_ns{0};
+std::atomic<bool> g_clock_paused{false};
+int64_t host_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
+Clock::time_point guest_now() { return Clock::now() - std::chrono::nanoseconds(paused_ns()); }
 
 Clock::time_point due_from(s64 due100ns) {
     const s64 rel = due100ns < 0 ? -due100ns : std::max<s64>(0, due100ns - system_time_100ns());
@@ -61,10 +67,10 @@ void worker() {
     std::unique_lock lk(g_m);
     for (;;) {
         const auto now = Clock::now();
-        wr<u32>(tick, u32(std::chrono::duration_cast<std::chrono::milliseconds>(now - g_boot).count()));
+        wr<u32>(tick, u32(std::chrono::duration_cast<std::chrono::milliseconds>(guest_now() - g_boot).count()));
 
-        // Expire timers.
-        for (auto it = g_timers.begin(); it != g_timers.end();) {
+        // Expire timers (not while paused: pause_clock moves them on afterwards).
+        for (auto it = g_clock_paused.load() ? g_timers.end() : g_timers.begin(); it != g_timers.end();) {
             if (it->second > now) { ++it; continue; }
             const u32 t = it->first;
             signal_object(t, 1);
@@ -131,6 +137,26 @@ void worker() {
 
 }  // namespace
 
+int64_t paused_ns() {
+    const int64_t total = g_paused_total_ns.load(std::memory_order_relaxed);
+    return g_clock_paused.load(std::memory_order_relaxed) ? total + (host_ns() - g_pause_began_ns.load(std::memory_order_relaxed)) : total;
+}
+
+void pause_clock(bool paused) {
+    std::lock_guard lk(g_m);
+    if (paused == g_clock_paused.load()) return;
+    if (paused) {
+        g_pause_began_ns = host_ns();
+        g_clock_paused = true;
+        return;
+    }
+    const int64_t d = host_ns() - g_pause_began_ns.load();
+    g_paused_total_ns += d;
+    g_clock_paused = false;
+    for (auto& [t, due] : g_timers) due += std::chrono::nanoseconds(d);  // as if the pause never happened
+    g_cv.notify_all();
+}
+
 void start_worker() {
     static std::once_flag once;
     std::call_once(once, [] { std::thread(worker).detach(); });
@@ -152,13 +178,13 @@ void raise_interrupt(u32 vector) {
 // --- time
 KEXPORT(KeQuerySystemTime) { wr<s64>(a[0], system_time_100ns()); return 0; }
 KEXPORT(KeQueryInterruptTime) {
-    const u64 t = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - g_boot).count() / 100);
+    const u64 t = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(guest_now() - g_boot).count() / 100);
     c.edx = u32(t >> 32);
     return u32(t);
 }
 constexpr u64 kAcpiFrequency = 3375000;  // Xbox ACPI timer
 KEXPORT(KeQueryPerformanceCounter) {
-    const u64 ns = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - g_boot).count());
+    const u64 ns = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(guest_now() - g_boot).count());
     const u64 t = u64((unsigned __int128)ns * kAcpiFrequency / 1000000000u);
     c.edx = u32(t >> 32);
     return u32(t);

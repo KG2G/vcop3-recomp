@@ -24,6 +24,9 @@ uint32_t current_kpcr();
 void start_boot_thread(uint32_t entry, uint32_t stack_size);
 // Block the calling host thread until every guest thread has exited.
 void wait_all_threads();
+// The pause menu: every guest thread stops at its next chance (never inside a critical
+// section), and all continue when unpaused.
+void pause_threads(bool paused);
 
 // Run guest code `fn(args...)` (stdcall) on a host-owned helper context, e.g.
 // DPCs and interrupt service routines. Caller must hold the guest lock.

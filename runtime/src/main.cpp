@@ -36,6 +36,8 @@
 #include "kernel/ps.h"
 #include "install.h"
 #include "updater.h"
+#include "pause.h"
+#include "pause_menu.h"
 #include "log.h"
 #include "privacy.h"
 #include "launcher.h"
@@ -105,6 +107,7 @@ int main(int argc, char** argv) {
     // project root above the executable if either has the game or is a source checkout, otherwise
     // the per-user data folder (installed builds: ~/.local/share/vcop3-recomp/vcop3-recomp/).
     if (!no_settings) settings::load();
+    pause_menu::set_saving(!no_settings);  // (the pause menu saves its changes to settings.ini)
     if (!no_settings && !settings::get("install_dir").empty()) {
         install::use_location(settings::get("install_dir"));  // the player's chosen folder
     } else if (!std::filesystem::exists("work/fs")) {
@@ -205,6 +208,17 @@ int main(int argc, char** argv) {
         if (const char* ws = std::getenv("VC3_WINDOW_SIZE"); ws && std::strchr(ws, 'x')) {
             ww = std::max(320, std::atoi(ws));
             wh = std::max(240, std::atoi(std::strchr(ws, 'x') + 1));
+            // Larger than the screen's free area (a 1920x1080 window on a 1080p screen with a taskbar,
+            // or any of the larger sizes on a small arcade monitor): scaled down to fit, same shape.
+            SDL_Rect r{};
+            if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &r) && r.w > 0 && r.h > 0) {
+                const double k = std::min({1.0, r.w * 0.95 / ww, (r.h - 40.0) / wh});  // (40: the title bar)
+                if (k < 1.0) {
+                    ww = std::max(320, int(ww * k) & ~1);
+                    wh = std::max(240, int(wh * k) & ~1);
+                    std::fprintf(stderr, "[main] window %dx%d (the chosen size scaled down to fit the screen)\n", ww, wh);
+                }
+            }
         } else if (ws && !std::strcmp(ws, "auto")) {
             // The picture's shape (the aspect ratio setting), about 80% of the screen's height.
             const double aspect = (4.0 / 3.0) / gpu::pgraph::glb::widescreen_factor();
@@ -275,6 +289,31 @@ int main(int argc, char** argv) {
                 next = comma ? comma + 1 : next + std::strlen(next);
             }
         }
+        // VC3_TEST_KEYS=S:Key,S:Key,... (testing): press and release a key at those seconds (SDL key names).
+        if (static const char* tk = std::getenv("VC3_TEST_KEYS"); tk) {
+            static std::string rest = tk;
+            const double t = double(SDL_GetTicks() - started) / 1000.0;
+            while (!rest.empty() && t >= std::atof(rest.c_str())) {
+                const size_t colon = rest.find(':'), comma = rest.find(',');
+                const std::string name = rest.substr(colon + 1, comma == std::string::npos ? std::string::npos : comma - colon - 1);
+                rest = comma == std::string::npos ? "" : rest.substr(comma + 1);
+                for (const bool down : {true, false}) {
+                    SDL_Event k{};
+                    k.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+                    k.key.key = SDL_GetKeyFromName(name.c_str());
+                    k.key.down = down;
+                    SDL_PushEvent(&k);
+                }
+            }
+        }
+        // VC3_TEST_PAUSE=S:D (testing): pause at S seconds for D seconds.
+        if (static const char* tp = std::getenv("VC3_TEST_PAUSE"); tp && std::strchr(tp, ':')) {
+            static int state = 0;
+            const double t = double(SDL_GetTicks() - started) / 1000.0, at = std::atof(tp), d = std::atof(std::strchr(tp, ':') + 1);
+            static const bool options = std::getenv("VC3_TEST_PAUSE_PAGE") && !std::strcmp(std::getenv("VC3_TEST_PAUSE_PAGE"), "options");
+            if (state == 0 && t >= at) state = 1, pause_menu::test_open(true, options);
+            if (state == 1 && t >= at + d) state = 2, pause_menu::test_open(false);
+        }
         // VC3_CAPTURE_AFTER=S (testing): an F9 capture after S seconds.
         static const double capture_after = std::getenv("VC3_CAPTURE_AFTER") ? std::atof(std::getenv("VC3_CAPTURE_AFTER")) : 0;
         static bool captured = false;
@@ -285,6 +324,7 @@ int main(int argc, char** argv) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) running = false;
+            if (pause_menu::handle_event(win, e)) continue;  // the pause menu (opening it; its input)
             // F11 or Alt+Enter: toggle fullscreen (desktop resolution; picture scaled to fit).
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                 (e.key.key == SDLK_F11 || (e.key.key == SDLK_RETURN && (e.key.mod & SDL_KMOD_ALT))))
@@ -311,7 +351,9 @@ int main(int argc, char** argv) {
             gpu::to_screen_coords(e);
             io::input::handle_event(e);
         }
-        io::input::update();
+        if (!pause::active()) io::input::update();  // (paused: the game gets no input)
+        pause_menu::frame(win);
+        if (pause_menu::exit_requested()) running = false;  // "Exit to desktop"
         // Startup shader compilation (new machine or driver): show progress in the title.
         {
             static bool shown = false;

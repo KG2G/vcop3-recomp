@@ -51,6 +51,9 @@ void take_handoff_stats(double& avg_us, double& max_us, unsigned long long& coun
 // the holder's priority; and cumulative host file-read time.
 void take_max_hold(uint64_t& ns, int& priority);
 extern std::atomic<uint64_t> g_io_ns;
+// The pause menu: while set, a running guest thread gives up the lock at its next loop back-edge
+// (yield_point), and the acquire hook parks it (kernel::ps::pause_threads).
+extern std::atomic<bool> g_pause_request;
 
 // RAII: release the guest lock around a blocking host operation.
 struct Unlocked {

@@ -109,6 +109,12 @@ bool init(SDL_Window* window) {
     if (g_init_done) return g_init_ok;
     g_init_done = true;
     Context& c = g_ctx;
+    // ---- the Vulkan library, loaded here rather than linked: a system without Vulkan (or with an
+    // older one, missing functions such as vkCmdBeginRendering) still starts -- with OpenGL.
+    if (volkInitialize() != VK_SUCCESS) {
+        std::fprintf(stderr, "[vk] no Vulkan library on this system: using OpenGL\n");
+        return false;
+    }
     // ---- instance
     uint32_t n = 0;
     vkEnumerateInstanceExtensionProperties(nullptr, &n, nullptr);
@@ -141,6 +147,7 @@ bool init(SDL_Window* window) {
         std::fprintf(stderr, "[vk] no Vulkan instance\n");
         return false;
     }
+    volkLoadInstance(c.instance);
     if (window && !SDL_Vulkan_CreateSurface(window, c.instance, nullptr, &c.surface)) {
         std::fprintf(stderr, "[vk] window surface: %s\n", SDL_GetError());
         c.surface = VK_NULL_HANDLE;
@@ -245,6 +252,7 @@ bool init(SDL_Window* window) {
         std::fprintf(stderr, "[vk] vkCreateDevice failed\n");
         return false;
     }
+    volkLoadDevice(c.device);
     vkGetDeviceQueue(c.device, c.queue_family, 0, &c.queue);
     c.push_descriptor = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(vkGetDeviceProcAddr(c.device, "vkCmdPushDescriptorSetKHR"));
     g_gpu_tl = make_timeline();

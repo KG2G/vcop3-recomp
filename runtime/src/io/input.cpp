@@ -153,8 +153,8 @@ void run_evdev(EvDev dev, RawState* st) {
             if (e.type == EV_REL && (e.code == REL_X || e.code == REL_Y)) {
                 constexpr float kScale = 0.4f;  // game pixels per count (a mouse sweep ~1600 counts)
                 auto& c = e.code == REL_X ? st->x : st->y;
-                const float lim = e.code == REL_X ? 640.0f : 480.0f;
-                c = std::clamp(c.load() + float(e.value) * kScale, -32.0f, lim + 32.0f);
+                const float lim = e.code == REL_X ? 640.0f : 480.0f, side = e.code == REL_X ? io::aim_extent() : 0.0f;
+                c = std::clamp(c.load() + float(e.value) * kScale, -32.0f - side, lim + 32.0f + side);
             } else if (e.type == EV_ABS && (e.code == ABS_X || e.code == ABS_Y)) {
                 const input_absinfo& a = e.code == ABS_X ? ax : ay;
                 const float v = a.maximum > a.minimum ? float(e.value - a.minimum) / float(a.maximum - a.minimum) : 0.5f;
@@ -405,7 +405,7 @@ void win_mouse(HANDLE h, const RAWMOUSE& m) {
         st->y = gy;
     } else if (m.lLastX || m.lLastY) {  // mice: a crosshair of their own
         constexpr float kScale = 0.4f;  // game pixels per count, as on Linux
-        st->x = std::clamp(st->x.load() + float(m.lLastX) * kScale, -32.0f, 640.0f + 32.0f);
+        st->x = std::clamp(st->x.load() + float(m.lLastX) * kScale, -32.0f - io::aim_extent(), 640.0f + 32.0f + io::aim_extent());
         st->y = std::clamp(st->y.load() + float(m.lLastY) * kScale, -32.0f, 480.0f + 32.0f);
     }
     static constexpr USHORT kDown[5] = {RI_MOUSE_BUTTON_1_DOWN, RI_MOUSE_BUTTON_2_DOWN, RI_MOUSE_BUTTON_3_DOWN,
@@ -632,6 +632,7 @@ Player g_p[2];
 std::vector<SDL_Gamepad*> g_pads;  // connection order
 std::vector<SDL_Keycode> g_keys_down;
 std::vector<Input> g_test_bind, g_service_bind;  // cabinet buttons (keys; gamepad 1)
+std::vector<Input> g_pause_bind;                 // the pause menu (keys; any gamepad)
 Uint64 g_last_tick = 0;
 Uint64 g_loop_gap_max_ns = 0;  // longest time between update() calls since the last report
 
@@ -755,6 +756,7 @@ void init() {
     }
     g_test_bind = parse(settings::get("test"));
     g_service_bind = parse(settings::get("service"));
+    g_pause_bind = parse(settings::get("pause"));
     for (SDL_Gamepad* g : g_pads) std::fprintf(stderr, "[input] gamepad: %s\n", SDL_GetGamepadName(g));
     g_last_tick = SDL_GetTicksNS();
 }
@@ -783,7 +785,7 @@ void handle_event(const SDL_Event& e) {
         case SDL_EVENT_MOUSE_MOTION:  // already in game coordinates (gpu::to_screen_coords)
             for (int i = 0; i < 2; ++i)
                 if (takes_system_mouse(i)) {
-                    g_p[i].x = std::clamp(e.motion.x, 0.0f, 640.0f);
+                    g_p[i].x = std::clamp(e.motion.x, -io::aim_extent(), 640.0f + io::aim_extent());  // (widescreen sides)
                     g_p[i].y = std::clamp(e.motion.y, 0.0f, 480.0f);
                 }
             break;
@@ -893,7 +895,8 @@ void update() {
                     return v > 0.05f ? v : 1.0f;
                 }();
                 const float kSpeed = 700.0f * sens;  // game pixels per second at full tilt
-                p.x = std::clamp(p.x + axis(left ? SDL_GAMEPAD_AXIS_LEFTX : SDL_GAMEPAD_AXIS_RIGHTX) * kSpeed * dt, 0.0f, 640.0f);
+                p.x = std::clamp(p.x + axis(left ? SDL_GAMEPAD_AXIS_LEFTX : SDL_GAMEPAD_AXIS_RIGHTX) * kSpeed * dt, -io::aim_extent(),
+                                 640.0f + io::aim_extent());
                 p.y = std::clamp(p.y + axis(left ? SDL_GAMEPAD_AXIS_LEFTY : SDL_GAMEPAD_AXIS_RIGHTY) * kSpeed * dt, 0.0f, 480.0f);
             }
         }
@@ -926,6 +929,20 @@ void update() {
     for (const Input& in : g_test_bind) test = test || held(cab, in);
     for (const Input& in : g_service_bind) service = service || held(cab, in);
     io::set_test_service(test, service);
+}
+
+bool is_pause_event(const SDL_Event& e) {
+    for (const Input& in : g_pause_bind) {
+        if (in.kind == Input::kKey && e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && int(e.key.key) == in.code) return true;
+        if (in.kind == Input::kPad && in.code < 100 && e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && int(e.gbutton.button) == in.code)
+            return true;
+    }
+    return false;
+}
+
+void release_held() {
+    g_keys_down.clear();
+    for (Player& p : g_p) p.mouse_buttons = 0;
 }
 
 double take_loop_gap_ms() {

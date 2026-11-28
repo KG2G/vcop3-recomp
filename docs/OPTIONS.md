@@ -31,10 +31,11 @@ VC3_RENDERER=vulkan VC3_RES_SCALE=3 VC3_WIDESCREEN=16:9 ./vc3
 | `VC3_RES_SCALE` | 3D resolution | `auto` (match display), `1`, `2`, `3`, `4`, `6`, `8` (times 640x480) |
 | `VC3_WIDESCREEN` | Aspect ratio | `auto` (match display), `0` (4:3), `16:9`, `16:10`, `21:9` |
 | `VC3_WIDE_HUD` | HUD in widescreen | `1` at the screen edges, `0` in place |
+| `VC3_WIDE_AIM` | Aim in widescreen | `1` the whole picture, side areas included (default), `0` the 4:3 area only |
 | `VC3_ANISOTROPIC` | Anisotropic filtering | `1` (off), `2`, `4`, `8`, `16` |
 | `VC3_SMAA` | Anti-aliasing (SMAA) | `off`, `low`, `medium`, `high`, `ultra` |
-| `VC3_WINDOW_SIZE` | Window size | `auto` (the aspect ratio, most of the screen), or e.g. `1280x960`, `1920x1080` |
-| `VC3_FULLSCREEN` | Window | `1` fullscreen (default), `0` windowed |
+| `VC3_FULLSCREEN` | Display mode | `1` fullscreen (default), `0` windowed |
+| `VC3_WINDOW_SIZE` | Window size (windowed) | e.g. `1280x720` (default), `640x480`, `1920x1080` -- scaled down if larger than the screen; `auto`: the aspect ratio, most of the screen |
 | `VC3_CROSSHAIR_IMAGE_P1`, `VC3_CROSSHAIR_IMAGE_P2` | Crosshair image P1 / P2 | path of an image file (PNG, BMP, TGA, JPG, GIF); empty: the built-in crosshair. Larger than the crosshair size, it is scaled down to fit; transparent parts stay see-through |
 | `VC3_CROSSHAIR` | Crosshair | `on`, `off` |
 | `VC3_CROSSHAIR_SIZE` | Crosshair size | `0.5` - `3` (1 = 5% of the screen height) |

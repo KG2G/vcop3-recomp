@@ -245,6 +245,45 @@ void per_vblank() {
     wr<uint8_t>(0x003A6557, 1);
 }
 
+// ---- Widescreen shooting (issue #10). The game only knows its 640x480 screen: a gun's raw position
+// (centred units, [block+0x1C]/[+0x20]) goes through the GUN ADJUSTMENT calibration -- per side of the
+// calibrated centre ([+0xB8] x, [+0xBA] y, s16) a slope ([+0xBC] left, [+0xC0] right, [+0xC8] / [+0xC4]
+// for y) -- into the aim, [+0x0C] = screen x - 320, [+0x10] = 240 - screen y (fn_0007be20, called by
+// fn_0007de30 each frame; the off-screen bit skips it). Everything after works from the aim with the
+// view's projection, which the widescreen picture keeps (the middle is the original, the 3D view
+// continues into the sides), so an aim beyond +-320 is a shot into the side areas. When a player
+// aims into a side area (io::aim_extent), the raw position is set to the one the game's own
+// calibration turns into that aim; inside the 4:3 screen nothing changes (calibration as before).
+float rd_f32(uint32_t a) {
+    const uint32_t u = rd<uint32_t>(a);
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+}
+void wide_aim(Cpu& c) {
+    const uint32_t blk = rd<uint32_t>(c.esp + 4);
+    if (blk < kWeaponBlock || blk >= kWeaponBlock + 2 * kWeaponStride || (blk - kWeaponBlock) % kWeaponStride) return;
+    if (io::aim_extent() <= 0.0f) return;
+    const int p = int((blk - kWeaponBlock) / kWeaponStride);
+    float ax, ay;
+    io::aim_point(p, ax, ay);
+    if (ax >= 0.0f && ax < 640.0f) return;  // on the 4:3 screen: the game's own result
+    const int want = int(std::lround(ax)) - 320;
+    const int cx = int(rd<int16_t>(blk + 0xB8));
+    const float left = rd_f32(blk + 0xBC), right = rd_f32(blk + 0xC0);
+    // The game: aim = (int)((raw - cx) * slope), the slope by the side of the centre (truncated).
+    auto aim_for = [&](int raw) { return int(double(raw - cx) * double(raw < cx ? left : right)); };
+    const float slope = want < 0 ? left : right;
+    if (!(std::fabs(slope) > 1e-4f)) return;
+    int raw = cx + int(std::lround(double(want) / double(slope)));
+    for (int d : {0, -1, 1, -2, 2})
+        if (aim_for(raw + d) == want) {
+            raw += d;
+            break;
+        }
+    wr<int32_t>(blk + 0x1C, raw);
+}
+
 // Each player's state byte (P1 0x3F3F68, P2 0x3F4018, 0xB0 apart): 0 not playing,
 // 2 playing (from pressing start, mission select included), 8 continue countdown,
 // 16 game over, 128 attract-mode demo.
@@ -351,6 +390,7 @@ void guest_hook(Cpu& c, uint32_t entry) {
             }
             break;
         }
+        case 0x0007be20: wide_aim(c); break;  // a gun's aim from its raw position (widescreen shooting)
         case 0x0007ed30:  // player update
             weapon_cheat(c);
             break;
@@ -359,6 +399,10 @@ void guest_hook(Cpu& c, uint32_t entry) {
             // hit can do, 127 -- every enemy at once, bosses in a few bullets.
             static const bool onehit = std::getenv("VC3_TEST_ONEHIT") != nullptr;
             const uint32_t shot = rd<uint32_t>(c.esp + 4);
+            if (std::getenv("VC3_TRACE_HITS"))  // (dev) each hit with the players' aims (widescreen shooting)
+                std::fprintf(stderr, "[hit] %.2f s: object %08x, aims P1 x %d y %d, P2 x %d y %d\n", log::uptime(), c.esi,
+                             rd<int32_t>(kWeaponBlock + 0x0C), rd<int32_t>(kWeaponBlock + 0x10),
+                             rd<int32_t>(kWeaponBlock + kWeaponStride + 0x0C), rd<int32_t>(kWeaponBlock + kWeaponStride + 0x10));
             if (std::getenv("VC3_TRACE_ENEMIES")) {  // (dev) which objects get hit
                 static std::set<uint32_t> seen;
                 if (seen.insert(c.esi).second)

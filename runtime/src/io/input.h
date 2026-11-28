@@ -33,6 +33,10 @@ void init();
 void handle_event(const SDL_Event& e);
 // Once per main-loop iteration: gamepad sticks, raw devices -> cabinet state.
 void update();
+// The pause menu's key / button (setting "pause"): this event presses it.
+bool is_pause_event(const SDL_Event& e);
+// Forget held keys and buttons (events missed while the pause menu had them).
+void release_held();
 
 // Player p's aim (game pixels) and whether they have a working aim device (crosshair).
 // The longest gap between input updates (window loop) since the last call, for the log.

@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "kernel/ke.h"
 #include "kernel/kernel.h"
 #include "vc3/helpers.h"
 #include "vc3/recomp.h"
@@ -85,7 +86,8 @@ void rdtsc(Cpu& c) {
     // derive a 733 MHz counter from the monotonic clock.
     timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    const u64 t = u64(ts.tv_sec) * 733333333ull + u64(ts.tv_nsec) * 733333333ull / 1000000000ull;
+    u64 t = u64(ts.tv_sec) * 733333333ull + u64(ts.tv_nsec) * 733333333ull / 1000000000ull;
+    t -= u64((unsigned __int128)u64(kernel::ke::paused_ns()) * 733333333ull / 1000000000ull);  // (pause menu)
     c.eax = u32(t);
     c.edx = u32(t >> 32);
 }

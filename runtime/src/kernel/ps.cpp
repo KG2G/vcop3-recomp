@@ -48,6 +48,7 @@ thread_local GuestThread* t_self = nullptr;
 std::mutex g_threads_m;
 std::condition_variable g_threads_cv;
 std::list<GuestThread> g_threads;
+std::atomic<bool> g_paused{false};  // the pause menu (pause_threads)
 int g_live = 0;
 std::atomic<u32> g_next_id{1};
 
@@ -145,15 +146,16 @@ void park_if_suspended() {
     // every other thread that needs the lock; CRI suspends its threads at arbitrary
     // points, which on a multi-core host can land inside XAPI's thread-startup lock.
     if (t->cs_held > 0) return;
+    if (t->suspend_count <= 0 && !g_paused.load(std::memory_order_relaxed)) return;
     in_park = true;
     if (g_trace_threads && t->suspend_count > 0) std::fprintf(stderr, "[thr] %u parks (count %d)\n", t->id, t->suspend_count);
     struct Reset { ~Reset() { in_park = false; } } reset;
     std::unique_lock lk(g_threads_m);
-    while (t->suspend_count > 0) {
+    while (t->suspend_count > 0 || g_paused.load()) {
         lk.unlock();
         sched::gil_release();
         lk.lock();
-        t->resume_cv.wait(lk, [&] { return t->suspend_count <= 0; });
+        t->resume_cv.wait(lk, [&] { return t->suspend_count <= 0 && !g_paused.load(); });
         lk.unlock();
         sched::gil_acquire();
         lk.lock();  // loop: the thread may have been suspended again meanwhile
@@ -176,6 +178,17 @@ void start_boot_thread(u32 entry, u32 stack_size) {
     sched::set_acquire_hook(park_if_suspended);
     sched::start_preemption();
     launch(create_thread(stack_size, 0, entry, 0, 0, false));
+}
+
+void pause_threads(bool paused) {
+    {
+        std::lock_guard lk(g_threads_m);
+        g_paused = paused;
+        if (!paused)
+            for (auto& t : g_threads) t.resume_cv.notify_all();
+    }
+    sched::g_pause_request = paused;
+    if (paused) g_yield_request.store(true, std::memory_order_relaxed);  // the running thread: to its next back-edge
 }
 
 void wait_all_threads() {

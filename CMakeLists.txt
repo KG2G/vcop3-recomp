@@ -48,6 +48,15 @@ FetchContent_Declare(libchdr
   GIT_SHALLOW    TRUE)
 FetchContent_MakeAvailable(miniz libchdr)
 
+# Vulkan functions loaded at runtime (volk, MIT): the program doesn't import them from the Vulkan
+# loader, so it still starts where Vulkan is missing or older than 1.3 (it uses OpenGL then).
+# (SOURCE_SUBDIR: only the sources -- volk.c is compiled into the runtime.)
+FetchContent_Declare(volk
+  GIT_REPOSITORY https://github.com/zeux/volk.git
+  GIT_TAG        vulkan-sdk-1.4.309.0
+  SOURCE_SUBDIR  none)
+FetchContent_MakeAvailable(volk)
+
 # Custom crosshair images: stb_image (Sean Barrett, public domain / MIT).
 FetchContent_Declare(stb
   GIT_REPOSITORY https://github.com/nothings/stb.git

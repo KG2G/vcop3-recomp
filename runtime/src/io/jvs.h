@@ -21,6 +21,11 @@ struct CabinetState {
 
 // Where gun 0/1 is aimed, in 640x480 screen pixels.
 void aim_point(int gun, float& x, float& y);
+// Widescreen shooting: how far (game pixels) a gun may aim beyond each side of the 4:3 screen -- the
+// widescreen side areas (0 without widescreen, or with VC3_WIDE_AIM=0). The aim point (aim_point)
+// keeps the real place; the game is told about it through a hook (hooks.cpp, wide_aim).
+float aim_extent();
+void set_wide_aim(bool on);  // (the pause menu)
 
 // Scripted input for testing (VC3_INPUT_SCRIPT=file). Lines: "<vblank> <action> [args]"
 //   coin1|coin2|start1|start2|test|service|pedal1|change1|trigger1|trigger2|offscreen1 [down|up]  (no arg = 4-frame press)

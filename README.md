@@ -34,8 +34,9 @@ Command-line options and environment variables: [docs/OPTIONS.md](docs/OPTIONS.m
 ### Launcher
 
 - **Settings**: renderer (OpenGL / Vulkan), 3D resolution (Match display or 1x-8x), aspect
-  ratio (4:3, 16:9, 16:10, 21:9) with the HUD at the screen edges, anisotropic filtering, SMAA,
-  window size, windowed / fullscreen, crosshair, its size and a custom crosshair image per player, Sinden lightgun border, vsync,
+  ratio (4:3, 16:9, 16:10, 21:9) with the HUD at the screen edges and aiming / shooting across the
+  whole picture (or only the 4:3 area, as on the arcade), anisotropic filtering, SMAA,
+  display mode (fullscreen / windowed), window size, crosshair, its size and a custom crosshair image per player, Sinden lightgun border, vsync,
   sound, free play, cheats (infinite ammo / lives / E.S. slow motion, start at the final stage, a
   starting weapon or all of them).
 - **Controls**: per player, the aim device (system mouse, a gamepad stick, one specific mouse or
@@ -54,6 +55,9 @@ Command-line options and environment variables: [docs/OPTIONS.md](docs/OPTIONS.m
 Default controls (player 1): mouse aims, left button fires, right button reloads, middle button
 or `E` changes weapon, Space is the pedal (E.S. slow motion), `1` starts, `5` inserts a coin
 (player 2: `2` and `6`); F2 / F3 test / service; F11 or Alt+Enter toggles fullscreen.
+**Esc** (or the gamepad's guide button) opens the pause menu: the game stands still; Resume, Options
+(volume, display mode, VSync, crosshair, widescreen aim and HUD -- changed live and saved) and Exit to
+desktop. The key / button can be changed in Controls -> Cabinet -> Pause menu.
 TEST (F2) during play restarts into the game's test menu, as on the cabinet (SERVICE moves, TEST
 selects; EXIT restarts the game). Its settings (difficulty, lives, gun adjustment, bookkeeping) are
 kept like the cabinet's battery-backed memory, in `work/hdd` of the install folder.
@@ -103,8 +107,8 @@ own licences (all permissive: MIT, BSD, zlib, Apache 2.0, public domain).
 
 ## Third-party code
 
-Fetched at build time: Zydis, Dear ImGui, miniz, libchdr, stb_image (Sean Barrett, public domain:
-custom crosshair images), and SMAA (Jorge Jimenez et al., MIT licence: the reference shader and its
+Fetched at build time: Zydis, Dear ImGui, miniz, libchdr, volk (MIT: Vulkan loaded at runtime),
+stb_image (Sean Barrett, public domain: custom crosshair images), and SMAA (Jorge Jimenez et al., MIT licence: the reference shader and its
 lookup tables).
 
 Virtua Cop 3 is a trademark of Sega. This project contains no Sega code or data; it only works

@@ -1,7 +1,7 @@
 // Vulkan context shared by the GPU thread's device (vk_device.cpp) and the window's
 // presenter (vk_present.cpp).
 #pragma once
-#include <vulkan/vulkan.h>
+#include "volk.h"  // the Vulkan API, its functions loaded at runtime (VK_NO_PROTOTYPES)
 
 #include <cstdint>
 #include <mutex>

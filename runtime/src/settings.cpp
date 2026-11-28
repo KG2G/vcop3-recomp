@@ -4,6 +4,7 @@
 #include <SDL3/SDL.h>
 
 #include <cstdio>
+#include <set>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -37,6 +38,10 @@ const std::vector<Option> kOptions = {
     {"wide_hud", "VC3_WIDE_HUD", "Graphics", "HUD in widescreen",
      "Move the score, ammo and lives panels out to the screen edges in widescreen.",
      {{"1", "At the edges"}, {"0", "In the 4:3 area"}}, "1"},
+    {"wide_aim", "VC3_WIDE_AIM", "Graphics", "Aim in widescreen",
+     "Whole picture: aim and shoot anywhere, the widescreen side areas included. 4:3 area: only the "
+     "middle part, as on the arcade (the sides just show more of the scene).",
+     {{"1", "Whole picture"}, {"0", "4:3 area"}}, "1"},
     {"anisotropic", "VC3_ANISOTROPIC", "Graphics", "Anisotropic filtering",
      "Sharper textures on surfaces seen at an angle (floors, roads, walls).",
      {{"1", "Off"}, {"2", "2x"}, {"4", "4x"}, {"8", "8x"}, {"16", "16x"}}, "16"},
@@ -47,14 +52,14 @@ const std::vector<Option> kOptions = {
     // Shaders are always precompiled at startup (every one the game used before) and new ones
     // built in the background, for smooth play from the start. (VC3_SHADER_PRECOMPILE=0 and
     // VC3_ASYNC_SHADERS=0 turn those off for testing.)
-    {"window_size", "VC3_WINDOW_SIZE", "Display", "Window size",
-     "Size of the game window when not fullscreen (it can also be resized by dragging). Match "
-     "display sizes it to the aspect ratio, filling most of the screen.",
-     {{"auto", "Match display"}, {"640x480", "640x480"}, {"960x720", "960x720"}, {"1280x960", "1280x960"}, {"1280x720", "1280x720"},
+    {"fullscreen", "VC3_FULLSCREEN", "Display", "Display mode",
+     "Fullscreen or in a window. F11 or Alt+Enter switches while playing.", {{"1", "Fullscreen"}, {"0", "Windowed"}}, "1"},
+    {"window_size", "VC3_WINDOW_SIZE", "Display", "Window size (windowed)",
+     "Size of the game window when not fullscreen (it can also be resized by dragging). A size larger "
+     "than the screen is scaled down to fit it.",
+     {{"640x480", "640x480"}, {"960x720", "960x720"}, {"1280x960", "1280x960"}, {"1280x720", "1280x720"},
       {"1600x900", "1600x900"}, {"1920x1080", "1920x1080"}, {"2560x1440", "2560x1440"}, {"3840x2160", "3840x2160"}},
-     "auto"},
-    {"fullscreen", "VC3_FULLSCREEN", "Display", "Window",
-     "F11 or Alt+Enter switches while playing.", {{"0", "Windowed"}, {"1", "Fullscreen"}}, "1"},
+     "1280x720"},
     {"crosshair", "VC3_CROSSHAIR", "Display", "Crosshair",
      "A crosshair at each player's aim point (red player 1, blue player 2), shown while that player is "
      "in a game (from pressing start until game over; either side can play alone).",
@@ -130,6 +135,7 @@ const std::vector<Option> kOptions = {
     {"p2_coin", nullptr, "Controls", "", "", {}, "key:6,pad:back,mouse:minus"},
     {"test", nullptr, "Controls", "", "", {}, "key:F2"},
     {"service", nullptr, "Controls", "", "", {}, "key:F3"},
+    {"pause", nullptr, "Controls", "", "", {}, "key:Escape,pad:guide"},
     {"install_dir", nullptr, "Files", "", "", {}, ""},  // game data folder (empty: per-user data folder)
     {"skip_launcher", nullptr, "Launcher", "Show this launcher",
      "When skipped, start with --launcher to see it again.", {{"0", "At every start"}, {"1", "Skip it"}}, "0"},
@@ -260,12 +266,22 @@ std::string get(const char* key) {
 
 void set(const char* key, const std::string& value) { g_values[key] = value; }
 
+// Options the environment set before apply() exported the rest (apply's own exports aren't "set by the
+// environment": the pause menu greyed every option out after it).
+std::set<std::string> g_external;
+bool g_applied = false;
+
 bool overridden(const char* key) {
     const Option* o = find(key);
-    return o && o->env && std::getenv(o->env) != nullptr;
+    if (!o || !o->env) return false;
+    return g_applied ? g_external.count(key) != 0 : std::getenv(o->env) != nullptr;
 }
 
 void apply() {
+    if (!g_applied)
+        for (const auto& o : kOptions)
+            if (o.env && std::getenv(o.env)) g_external.insert(o.key);
+    g_applied = true;
     for (const auto& o : kOptions)
         if (o.env && !overridden(o.key)) platform::set_env(o.env, get(o.key).c_str());
 }

@@ -96,6 +96,8 @@ bool toggle_no_alpha_test();
 // Developer switch (F6): depth test off (painter's order), to tell a surface hidden by a wrong
 // depth from one never drawn.
 bool toggle_no_depth_test();
+// HUD in widescreen (VC3_WIDE_HUD) while playing (the pause menu).
+void set_wide_hud(bool on);
 bool debug_no_depth();
 bool debug_no_alpha();
 // Complete finished asynchronous write-backs (GPU thread, when otherwise idle).

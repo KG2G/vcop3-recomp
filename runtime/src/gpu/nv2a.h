@@ -34,6 +34,11 @@ void to_screen_coords(SDL_Event& e);
 void window_to_game(float nx, float ny, float& gx, float& gy);
 // Toggle fullscreen; prefers a display mode whose refresh is a multiple of 60 Hz.
 void toggle_fullscreen();
+// Settings changed while playing (the pause menu): fullscreen (including the borderless kind),
+// VSync, the crosshairs.
+bool fullscreen_on();
+void set_vsync(bool on);
+void set_crosshair(bool on, float size);
 
 void shutdown();
 

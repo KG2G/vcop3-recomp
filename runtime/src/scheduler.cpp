@@ -25,6 +25,7 @@ namespace vc3 {
 std::atomic<bool> g_yield_request{false};
 
 namespace sched {
+std::atomic<bool> g_pause_request{false};
 namespace {
 
 // Host threads that aren't guest threads (the kernel worker delivering ISRs and
@@ -307,6 +308,11 @@ void yield_point(Cpu& c) {
         return;
     }
     g_yield_request.store(false, std::memory_order_relaxed);
+    if (sched::g_pause_request.load(std::memory_order_relaxed)) {  // the pause menu: park (acquire hook)
+        sched::gil_release();
+        sched::gil_acquire();
+        return;
+    }
     if (!sched::should_yield()) {
         sched::g_refused_prio.fetch_add(1, std::memory_order_relaxed);
         return;

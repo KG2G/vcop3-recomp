@@ -222,12 +222,12 @@ void controls_page(float label_w) {
     // Cabinet buttons
     ImGui::Spacing();
     ImGui::SeparatorText("Cabinet");
-    for (int c = 0; c < 2; ++c) {
-        const char* k = c == 0 ? "test" : "service";
+    for (int c = 0; c < 3; ++c) {
+        const char* k = c == 0 ? "test" : c == 1 ? "service" : "pause";
         ImGui::PushID(k);
         const bool cap = g_cap.player == 2 && g_cap.action == c;
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(c == 0 ? "Test (operator menu)" : "Service");
+        ImGui::TextUnformatted(c == 0 ? "Test (operator menu)" : c == 1 ? "Service" : "Pause menu");
         ImGui::SameLine(label_w);
         const float bw = ImGui::CalcTextSize("Clear").x + ImGui::GetStyle().FramePadding.x * 2;
         const float tw = ImGui::GetContentRegionAvail().x - 3 * (bw + ImGui::GetStyle().ItemSpacing.x);
@@ -239,12 +239,18 @@ void controls_page(float label_w) {
         ImGui::SameLine();
         if (ImGui::Button("+", ImVec2(bw, 0))) g_cap = {2, c, true, SDL_GetTicks()};
         ImGui::SameLine();
-        if (ImGui::Button("Clear", ImVec2(bw, 0))) settings::set(k, "");
+        if (c < 2) {
+            if (ImGui::Button("Clear", ImVec2(bw, 0))) settings::set(k, "");
+        } else if (ImGui::Button("Default", ImVec2(bw, 0))) {  // (Esc can't be captured: it cancels)
+            for (const auto& o : settings::options())
+                if (!std::strcmp(o.key, "pause")) settings::set(k, o.def);
+        }
         ImGui::PopID();
     }
     ImGui::Spacing();
     ImGui::TextWrapped("Mouse buttons are the buttons of the player's aim device (the system mouse, or the chosen "
-                       "mouse / lightgun). Pad buttons are the player's gamepad. F2 / F3: test / service.");
+                       "mouse / lightgun). Pad buttons are the player's gamepad. F2 / F3: test / service. Pause menu: "
+                       "Esc or the gamepad's guide button by default (any gamepad).");
 #ifdef _WIN32
     ImGui::TextWrapped("Separate mice, lightguns and Wiimotes: Windows moves its cursor with every mouse, so give each "
                        "player their own device instead of pairing one with \"System mouse\". Wiimote support on Windows "
@@ -600,7 +606,7 @@ bool run() {
                 }
                 const std::string b = captured(e);
                 if (!b.empty()) {
-                    const std::string k = g_cap.player == 2 ? std::string(g_cap.action == 0 ? "test" : "service")
+                    const std::string k = g_cap.player == 2 ? std::string(g_cap.action == 0 ? "test" : g_cap.action == 1 ? "service" : "pause")
                                                             : key_of(g_cap.player, io::input::kActions[g_cap.action]);
                     std::string cur = settings::get(k.c_str());
                     settings::set(k.c_str(), g_cap.append && !cur.empty() ? cur + "," + b : b);

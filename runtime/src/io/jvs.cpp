@@ -1,3 +1,4 @@
+#include "gpu/gl_backend.h"
 #include "jvs.h"
 
 #include <algorithm>
@@ -79,10 +80,13 @@ uint16_t to_raw(float v) { return uint16_t(std::clamp(v, 0.0f, 65535.0f)); }
 // inside the 4:3 part in widescreen).
 static std::atomic<float> g_aim_px[2][2] = {{320.0f, 240.0f}, {320.0f, 240.0f}};
 static void set_aim(GunState& g, float nx, float ny) {
+    // The aim point keeps the real place, the widescreen side areas included (aim_extent); the
+    // analog value the game reads stays within its 4:3 screen (the side areas reach the game by a hook).
+    const float ext = aim_extent() / 640.0f;
+    const int gi = &g == &g_state.gun[1] ? 1 : 0;
+    g_aim_px[gi][0] = std::clamp(nx, -ext, 1.0f + ext) * 640.0f;
     nx = std::clamp(nx, 0.0f, 1.0f);
     ny = std::clamp(ny, 0.0f, 1.0f);
-    const int gi = &g == &g_state.gun[1] ? 1 : 0;
-    g_aim_px[gi][0] = nx * 640.0f;
     g_aim_px[gi][1] = ny * 480.0f;
     static const bool linear = std::getenv("VC3_GUN_LINEAR") != nullptr;
     if (linear) {
@@ -265,6 +269,14 @@ void set_test_service(bool test, bool service) {
     g_state.service = service;
 }
 bool scripted() { return std::getenv("VC3_INPUT_SCRIPT") != nullptr; }
+
+static std::atomic<int> g_wide_aim{-1};  // -1: from VC3_WIDE_AIM
+void set_wide_aim(bool on) { g_wide_aim = on; }
+float aim_extent() {
+    if (g_wide_aim < 0) g_wide_aim = !(std::getenv("VC3_WIDE_AIM") && !std::strcmp(std::getenv("VC3_WIDE_AIM"), "0"));
+    const double k = gpu::pgraph::glb::widescreen_factor();  // 4:3 width / picture width (1: no widescreen)
+    return !g_wide_aim || k >= 0.999 ? 0.0f : float(320.0 / k - 320.0);
+}
 
 void aim_point(int gun, float& x, float& y) {
     x = g_aim_px[gun & 1][0].load(std::memory_order_relaxed);
