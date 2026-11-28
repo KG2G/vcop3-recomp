@@ -1,5 +1,6 @@
 #include "updater.h"
 
+#include "log.h"
 #include "platform.h"
 
 #include <algorithm>
@@ -545,6 +546,7 @@ void restart() {
     std::vector<std::string> args = platform::args();
     if (args.empty()) args.push_back(t.string());
     args[0] = t.string();
+    log::end("updated: restarting the new version");
     std::fflush(stderr);
 #ifdef _WIN32
     std::wstring cmd;

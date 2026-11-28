@@ -29,6 +29,7 @@
 #include "gpu/device.h"
 #include "io/input.h"
 #include "platform.h"
+#include "gpu/crosshair_image.h"
 #include "io/jvs.h"
 #include "kernel/ke.h"
 #include "mmio.h"
@@ -407,6 +408,16 @@ void gpu_thread() {
             }
             base = dma_base((g.regs[PFIFO + 0x122C] & 0xFFFF) << 4);  // CACHE1_DMA_INSTANCE
         }
+        // VC3_TEST_GPU_STALL=T:D (testing): once, after T s of run time, the GPU thread stops for D ms -- like
+        // the NVIDIA Windows driver compiling for seconds on the first draws after a new program file.
+        if (static const char* st = std::getenv("VC3_TEST_GPU_STALL"); st && std::strchr(st, ':')) {
+            static bool done = false;
+            if (!done && log::uptime() >= std::atof(st)) {
+                done = true;
+                std::fprintf(stderr, "[test] GPU thread stalls for %s ms\n", std::strchr(st, ':') + 1);
+                std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(std::strchr(st, ':') + 1)));
+            }
+        }
         const auto t0 = Clock::now();
         g_pusher_busy = true;
         run_pusher(base);
@@ -470,12 +481,18 @@ void maybe_screenshot() {
 // window's display refreshes at a whole multiple of 60 Hz (60/120/180/240) and
 // presents measurably keep pace with it, the timer is phase-locked to the display:
 // every k-th refresh reports its time, and the timer's phase and period are nudged
-// toward it, so each game frame lands on its own refresh without drift. Missing
+// toward it, so each game frame lands on its own refresh without drift. The tick is
+// steered to halfway between two refreshes: the present loop takes the newest picture
+// right after each present returns, and a tick close to that moment (it used to be 1 ms
+// after) races it -- jitter of a millisecond decided whether a picture was shown on this
+// refresh or the next, so pictures were shown twice and skipped at random: judder that
+// looks like ghosting with VSync on (issue #12). Missing
 // reports just leave the timer free-running. VC3_VSYNC=0 / VC3_VSYNC_LOCK=0 turn
 // this off.
 std::atomic<bool> g_vs_locked{false};
 std::atomic<s64> g_vs_report_ns{0};  // time of the latest locked refresh (steady clock, ns)
 std::atomic<u64> g_vs_reports{0};
+std::atomic<int> g_vs_per_vblank{1};    // display refreshes per guest vblank while lockable
 // Like the CRTC, the picture shown during a refresh is latched at vblank: the
 // window presents the buffer that was being scanned out at the last guest vblank.
 std::atomic<u64> g_display_seq{0};
@@ -484,17 +501,19 @@ u32 g_display_start = 0;             // under g.m
 s64 to_ns(Clock::time_point t) { return std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count(); }
 
 void vblank_thread() {
+    platform::set_thread_priority(platform::Priority::kTimeCritical);  // a late tick is a late game frame
     constexpr double kPeriod = 1e9 / 60.0;
     double period = kPeriod;
     auto next = Clock::now();
     u64 seen_reports = 0;
     for (;;) {
-        // Phase-locked loop: steer the tick to fall ~1 ms after a display refresh.
+        // Phase-locked loop: steer the tick to fall halfway between two display refreshes.
         if (g_vs_locked.load(std::memory_order_relaxed)) {
             const u64 r = g_vs_reports.load(std::memory_order_acquire);
             if (r != seen_reports) {
                 seen_reports = r;
-                const double target = double(g_vs_report_ns.load(std::memory_order_relaxed)) + 1e6;
+                const double target = double(g_vs_report_ns.load(std::memory_order_relaxed)) +
+                                      period / double(g_vs_per_vblank.load(std::memory_order_relaxed)) / 2;
                 double err = std::fmod(target - double(to_ns(next)), period);  // where the next tick should move
                 if (err > period / 2) err -= period;
                 if (err < -period / 2) err += period;
@@ -711,6 +730,15 @@ SDL_Window* g_window = nullptr;
 bool g_vsync = true;
 double g_refresh = 0;  // Hz
 int g_vs_k = 0;        // refreshes per guest vblank if lockable, else 0
+bool g_present_blocks = false;  // presents wait for vsync
+// Windows presentation (choose_pacing): 0 a vsync'd present every refresh, locked on the presents' own
+// timing; 1 OpenGL in a window: presents don't wait; 2 fullscreen: each new picture once, vsync'd.
+// 1 and 2 lock the game's timer on the desktop compositor's refresh times. -1: to be chosen again.
+int g_pacing = -1;
+bool g_dwm_mode = false;        // presents don't wait (mode 1)
+bool g_fresh_only = false;      // only new pictures are presented (modes 1, 2)
+bool g_dwm_lock = false;        // the lock follows the compositor's timing (modes 1, 2)
+bool g_dwm_failed = false;      // no compositor timing: mode 0 for good
 
 void update_display_mode() {
     const SDL_DisplayMode* m = g_window ? SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(g_window)) : nullptr;
@@ -724,17 +752,20 @@ void update_display_mode() {
     // so the cadence is fixed instead of depending on how two free clocks line up.
     static const bool no_lock = std::getenv("VC3_VSYNC_LOCK") && !std::strcmp(std::getenv("VC3_VSYNC_LOCK"), "0");
     g_vs_k = g_vsync && !no_lock && k >= 1 && k <= 4 && std::fabs(r / double(k) - 60.0) < 1.0 ? int(k) : 0;
+    g_vs_per_vblank = std::max(1, g_vs_k);
     // Presents wait for vsync only where that is needed: to measure the refresh for
     // the lock, or on platforms whose windows could tear. A Wayland compositor never
     // shows a torn window, so there a non-blocking present simply hands it the newest
     // picture, and a busy compositor can't hold the present loop up.
     const bool wayland = !std::strcmp(SDL_GetCurrentVideoDriver(), "wayland");
     const bool block = g_vsync && (g_vs_k || !wayland);
+    g_present_blocks = block;
 #ifdef VC3_HAVE_VULKAN
     if (g_vulkan) vkp::set_vsync(block);
     else
 #endif
         SDL_GL_SetSwapInterval(block ? 1 : 0);
+    g_pacing = -1;
     std::fprintf(stderr, "[present] display %dx%d @ %.2f Hz: %s, %s presents\n", m ? m->w : 0, m ? m->h : 0, r,
                  g_vs_k ? "game timer phase-locked to vsync when presents keep pace" : "game on its own 60 Hz timer",
                  block ? "vsync-paced" : "non-blocking");
@@ -753,10 +784,14 @@ void on_refresh(Clock::time_point now) {
     last = now;
     if (dt > 100.0) { ema = expected; good = bad = 0; return; }
     ema = ema * 0.95 + dt * 0.05;
-    const bool ok = std::fabs(ema - expected) < 0.05 * expected;
+    // Presents must keep the display's own rate closely (0.5%): on Windows, OpenGL presents in a window
+    // came back every 17.0-17.3 ms on a 16.68 ms display (missing compositor frames); the lock then
+    // followed that slipping clock and the game's speed wobbled ("super jumpy"). Off the mark, the
+    // game keeps its steady 60 Hz timer instead.
+    const bool ok = std::fabs(ema - expected) < 0.005 * expected;
     good = ok ? good + 1 : 0;
     bad = ok ? 0 : bad + 1;
-    if (!g_vs_locked && good > 120) {
+    if (!g_vs_locked && good > 30) {  // ~0.5 s of presents on time (after a fullscreen switch: re-lock soon)
         g_vs_locked = true;
         std::fprintf(stderr, "[present] phase-locked to vsync (%.3f ms refresh)\n", ema);
     } else if (g_vs_locked && bad > 60) {
@@ -867,10 +902,47 @@ void window_to_game(float nx, float ny, float& gx, float& gy) {
     gy = (ny * float(h) - y0) * 480.0f / ph;
 }
 
+Clock::time_point g_surface_reset_at{};  // Vulkan: recreate the surface then (after a fullscreen switch)
+// Windows (elsewhere with VC3_VK_RESET_SURFACE=1, for testing).
+bool surface_resets() {
+#ifdef _WIN32
+    return true;
+#else
+    static const bool on = std::getenv("VC3_VK_RESET_SURFACE") != nullptr;
+    return on;
+#endif
+}
+
 void toggle_fullscreen() {
     if (!g_window) return;
+    // Vulkan, real fullscreen: start afresh once the window has its new size (see vkp::reset_surface).
+    auto reset_surface_soon = [] {
+#ifdef VC3_HAVE_VULKAN
+        if (g_vulkan && surface_resets()) g_surface_reset_at = Clock::now() + std::chrono::milliseconds(150);
+#endif
+    };
+#ifdef _WIN32
+    // Windows: "fullscreen" is a borderless window over the whole screen, one pixel taller than it
+    // (the extra row is off the bottom edge). In real fullscreen, NVIDIA's OpenGL frames looked jumpy
+    // whatever the pacing, and Vulkan became jumpy after an F11 switch until a restart (even with a
+    // fresh surface: the window itself kept the state) -- while both renderers were smooth in a
+    // window, shown by the desktop compositor, which never tears. Not exactly screen-sized, it stays
+    // a window to the drivers and to Windows, and F11 just resizes it (issue #12).
+    // VC3_FULLSCREEN_MODE=exclusive (or VC3_GL_FULLSCREEN=exclusive): real fullscreen. (Only where the
+    // desktop's refresh suits 60 fps; else real fullscreen at a mode that does, as below.)
+    static bool borderless = false;
+    static SDL_Rect saved{};
+    if (borderless) {
+        borderless = false;
+        SDL_SetWindowBordered(g_window, true);
+        SDL_SetWindowPosition(g_window, saved.x, saved.y);
+        SDL_SetWindowSize(g_window, saved.w, saved.h);
+        return;
+    }
+#endif
     if (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) {
         SDL_SetWindowFullscreen(g_window, false);
+        reset_surface_soon();
         return;
     }
     // Borderless at the desktop mode if its refresh suits the game (a multiple of
@@ -883,6 +955,25 @@ void toggle_fullscreen() {
         const long k = std::lround(r / 60.0);
         return k >= 1 && k <= 4 && std::fabs(double(r) / double(k) - 60.0) < 1.0;
     };
+#ifdef _WIN32
+    static const bool exclusive = [] {
+        const char* a = std::getenv("VC3_FULLSCREEN_MODE");
+        const char* b = std::getenv("VC3_GL_FULLSCREEN");
+        return (a && !std::strcmp(a, "exclusive")) || (b && !std::strcmp(b, "exclusive"));
+    }();
+    SDL_Rect b{};
+    if (!exclusive && desk && lockable(desk->refresh_rate) && SDL_GetDisplayBounds(d, &b)) {
+        SDL_GetWindowPosition(g_window, &saved.x, &saved.y);
+        SDL_GetWindowSize(g_window, &saved.w, &saved.h);
+        borderless = true;
+        SDL_SetWindowBordered(g_window, false);
+        SDL_SetWindowPosition(g_window, b.x, b.y);
+        SDL_SetWindowSize(g_window, b.w, b.h + 1);
+        std::fprintf(stderr, "[present] fullscreen: borderless window %dx%d (%s; shown by the desktop compositor)\n", b.w, b.h,
+                     g_vulkan ? "Vulkan" : "OpenGL");
+        return;
+    }
+#endif
     const SDL_DisplayMode* best = nullptr;
     int n = 0;
     SDL_DisplayMode** modes = nullptr;
@@ -895,6 +986,7 @@ void toggle_fullscreen() {
     }
     SDL_SetWindowFullscreenMode(g_window, best);
     SDL_SetWindowFullscreen(g_window, true);
+    reset_surface_soon();
     if (best) std::fprintf(stderr, "[present] fullscreen mode %dx%d @ %.2f Hz\n", best->w, best->h, double(best->refresh_rate));
     SDL_free(modes);
 }
@@ -978,7 +1070,8 @@ void select_picture(u32 start) {
 // Crosshairs over the picture (VC3_CROSSHAIR=on|off), for players in a game only: rectangles in window pixels,
 // top-left origin, drawn after the picture (outline first).
 using dev::OverlayRect;
-std::vector<OverlayRect> crosshair_rects(int wh, float x, float y, float pw, float ph) {
+using dev::OverlayImage;
+std::vector<OverlayRect> crosshair_rects(int wh, float x, float y, float pw, float ph, std::vector<OverlayImage>& images) {
     std::vector<OverlayRect> out;
     static const std::string mode = std::getenv("VC3_CROSSHAIR") ? std::getenv("VC3_CROSSHAIR") : "on";
     if (mode == "off") return out;
@@ -997,6 +1090,12 @@ std::vector<OverlayRect> crosshair_rects(int wh, float x, float y, float pw, flo
         float ax, ay;
         if (!io::input::crosshair(p, ax, ay) || !vc3::player_in_game(p)) continue;
         const int cx = int(gx0 + ax * gw / 640.0f), cy = int(y + ay * ph / 480.0f);
+        // A custom image (VC3_CROSSHAIR_IMAGE_P1/_P2), centred on the aim, fitted into the built-in
+        // crosshair's size (5% of the window height at 100%).
+        if (const auto* img = crosshair::get(p, std::max(8, int(s * 0.05f + 0.5f)))) {
+            images.push_back({cx - img->w / 2, cy - img->h / 2, img->w, img->h, img->px.data(), p, img->version});
+            continue;
+        }
         const uint8_t r = p == 0 ? 255 : 40, g = p == 0 ? 40 : 140, b = p == 0 ? 40 : 255;  // P1 red, P2 blue
         const int arms[4][4] = {{cx - gap - arm, cy - th / 2, arm, th}, {cx + gap, cy - th / 2, arm, th},
                                 {cx - th / 2, cy - gap - arm, th, arm}, {cx - th / 2, cy + gap, th, arm}};
@@ -1012,8 +1111,8 @@ std::vector<OverlayRect> crosshair_rects(int wh, float x, float y, float pw, flo
 // border (VC3_SINDEN_BORDER=percent, 0 off): a white frame at the window's edges, that
 // percent of the window height thick. The gun's camera finds the screen by it; the gun then
 // moves the system mouse over the whole screen, which maps to the game like any mouse.
-std::vector<OverlayRect> overlay_rects(int w, int h, float x, float y, float pw, float ph) {
-    std::vector<OverlayRect> out = crosshair_rects(h, x, y, pw, ph);
+std::vector<OverlayRect> overlay_rects(int w, int h, float x, float y, float pw, float ph, std::vector<OverlayImage>& images) {
+    std::vector<OverlayRect> out = crosshair_rects(h, x, y, pw, ph, images);
     static const float pct = [] {
         const char* e = std::getenv("VC3_SINDEN_BORDER");
         const float v = e ? float(std::atof(e)) : 0.0f;
@@ -1044,13 +1143,49 @@ void draw_picture() {
     glBlitNamedFramebuffer(g_read_fbo, 0, 0, 0, g_src_w, g_src_h, GLint(x), GLint(y + ph), GLint(x + pw), GLint(y),
                            GL_COLOR_BUFFER_BIT, GL_LINEAR);
     // Crosshairs, Sinden border: solid rectangles (scissored clears; GL's window rows run bottom-up).
+    std::vector<OverlayImage> images;
+    const std::vector<OverlayRect> rects = overlay_rects(w, h, x, y, pw, ph, images);
     glEnable(GL_SCISSOR_TEST);
-    for (const OverlayRect& r : overlay_rects(w, h, x, y, pw, ph)) {
+    for (const OverlayRect& r : rects) {
         glScissor(r.x, h - r.y - r.h, r.w, r.h);
         glClearColor(r.r / 255.0f, r.g / 255.0f, r.b / 255.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
     }
     glDisable(GL_SCISSOR_TEST);
+    // Custom crosshair images: uploaded once per change, then each run of drawn pixels in a row
+    // copied 1:1 into the window (no blending: see crosshair_image.h).
+    static GLuint tex[2] = {};
+    static int tex_w[2] = {}, tex_h[2] = {};
+    static uint64_t tex_version[2] = {};
+    for (const OverlayImage& im : images) {
+        const int sl = im.slot & 1;
+        if (!tex[sl] || tex_w[sl] != im.w || tex_h[sl] != im.h) {
+            if (tex[sl]) glDeleteTextures(1, &tex[sl]);
+            glCreateTextures(GL_TEXTURE_2D, 1, &tex[sl]);
+            glTextureStorage2D(tex[sl], 1, GL_RGBA8, im.w, im.h);
+            tex_w[sl] = im.w;
+            tex_h[sl] = im.h;
+            tex_version[sl] = 0;
+        }
+        if (tex_version[sl] != im.version) {
+            glTextureSubImage2D(tex[sl], 0, 0, 0, im.w, im.h, GL_BGRA, GL_UNSIGNED_BYTE, im.px);  // 0xAARRGGBB in memory = B,G,R,A
+            tex_version[sl] = im.version;
+        }
+        glNamedFramebufferTexture(g_read_fbo, GL_COLOR_ATTACHMENT0, tex[sl], 0);
+        for (int row = 0; row < im.h; ++row) {
+            const int wy = im.y + row;
+            if (wy < 0 || wy >= h) continue;
+            const uint32_t* line = im.px + size_t(row) * size_t(im.w);
+            for (int x0 = 0; x0 < im.w;) {
+                if (!(line[x0] >> 24)) { ++x0; continue; }
+                int x1 = x0;
+                while (x1 < im.w && (line[x1] >> 24)) ++x1;
+                glBlitNamedFramebuffer(g_read_fbo, 0, x0, row, x1, row + 1, im.x + x0, h - wy - 1, im.x + x1, h - wy,
+                                       GL_COLOR_BUFFER_BIT, GL_NEAREST);
+                x0 = x1;
+            }
+        }
+    }
 }
 }  // namespace
 
@@ -1066,8 +1201,93 @@ void request_window_shot(const std::string& path) {
     g_capture_shot = path;
 }
 
+// How presents are paced on Windows (see g_pacing). In a window the desktop compositor (DWM) shows the
+// picture; there OpenGL's vsync'd swap came back irregularly (23-33 ms at every skipped picture) and the
+// game's timer, locked on it, drifted: doubled frames ("jumpy", issue #12). So OpenGL in a window
+// presents without waiting and the game's timer follows the compositor's own refresh times. In
+// fullscreen (both renderers) Windows may show the picture without the compositor, and with G-Sync
+// (variable refresh, on for fullscreen by default) every present makes the screen refresh: presenting
+// the same picture again on every refresh (to keep in step with a fixed refresh) knocked the real
+// frames' timing about -- jumpy with Vulkan and OpenGL alike. So fullscreen presents each new picture
+// exactly once, vsync'd (no tearing): with a fixed refresh the compositor-locked timer puts each one on
+// its own refresh; with G-Sync they arrive at a steady 60 per second and are shown as they come.
+// VC3_GL_PACING=swap / VC3_FULLSCREEN_PACING=repeat: the old way (mode 0).
+void choose_pacing() {
+#ifdef _WIN32
+    static const char* const gl_pacing = std::getenv("VC3_GL_PACING");
+    static const char* const fs_pacing = std::getenv("VC3_FULLSCREEN_PACING");
+    static const bool gl_swap = gl_pacing && !std::strcmp(gl_pacing, "swap");
+    static const bool fs_repeat = fs_pacing && !std::strcmp(fs_pacing, "repeat");
+    // Vulkan in a window (and the borderless "fullscreen") paces like OpenGL there: its vsync'd presents
+    // came back unevenly after a resize (F11) and its timer, locked on them, drifted (16.72-16.96 ms on
+    // a 16.68 ms display, ~33 pictures a minute skipped) until a restart. VC3_VK_PACING=fifo: the old way.
+    static const bool vk_fifo = std::getenv("VC3_VK_PACING") && !std::strcmp(std::getenv("VC3_VK_PACING"), "fifo");
+    const bool fullscreen = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN;
+    int mode = 0;
+    if (g_present_blocks && !g_dwm_failed) {
+        if (fullscreen) mode = fs_repeat || (!g_vulkan && gl_swap) ? 0 : 2;
+        else if (g_vulkan ? !vk_fifo : !gl_swap) mode = 1;
+    }
+    if (mode == g_pacing) return;
+    g_pacing = mode;
+    g_dwm_mode = mode == 1;
+    g_fresh_only = g_dwm_lock = mode != 0;
+    g_vs_locked = false;  // lock again from the new timing source
+    if (!g_vulkan) SDL_GL_SetSwapInterval(mode == 1 ? 0 : (g_present_blocks ? 1 : 0));
+#ifdef VC3_HAVE_VULKAN
+    else vkp::set_vsync(mode != 1 && g_present_blocks);  // mode 1: mailbox (the compositor takes the newest)
+#endif
+    if (g_present_blocks)
+        std::fprintf(stderr, "[present] pacing: %s (%s, %s)\n",
+                     mode == 1   ? "each new picture once, not waiting; timer on the desktop compositor's refreshes"
+                     : mode == 2 ? "each new picture once, vsync'd; timer on the desktop compositor's refreshes"
+                                 : "vsync'd present every refresh",
+                     g_vulkan ? "Vulkan" : "OpenGL", fullscreen ? "fullscreen" : "window");
+#endif
+}
+
+#ifdef _WIN32
+// Report the compositor's latest refresh to the vblank timer's lock (modes 1 and 2).
+void report_dwm_timing() {
+    long long vb = 0, per = 0;
+    unsigned long long cnt = 0;
+    static unsigned long long last_cnt = 0;
+    if (!platform::dwm_timing(vb, per, cnt)) {
+        g_dwm_failed = true;  // no compositor timing: mode 0 from the next present
+        g_pacing = -1;
+        g_dwm_mode = g_fresh_only = g_dwm_lock = false;
+        g_vs_locked = false;
+        std::fprintf(stderr, "[present] no desktop compositor timing: vsync'd presents every refresh\n");
+        return;
+    }
+    if (!g_vs_k || cnt == last_cnt) return;
+    last_cnt = cnt;
+    // Lock only to a compositor running at the display's rate (0.5%), and report every k-th refresh
+    // (one per guest vblank: 120 Hz -> every 2nd).
+    const double per_ms = double(per) / 1e6, expected = 1000.0 / g_refresh;
+    const bool ok = std::fabs(per_ms - expected) < 0.005 * expected;
+    if (ok && !g_vs_locked) {
+        g_vs_locked = true;
+        std::fprintf(stderr, "[present] phase-locked to the desktop compositor (%.3f ms refresh)\n", per_ms);
+    } else if (!ok && g_vs_locked) {
+        g_vs_locked = false;
+        std::fprintf(stderr, "[present] compositor lock released (%.3f ms refresh)\n", per_ms);
+    }
+    if (ok && cnt % u64(g_vs_k) == 0) {
+        g_vs_report_ns.store(vb, std::memory_order_relaxed);
+        g_vs_reports.fetch_add(1, std::memory_order_release);
+    }
+}
+#endif
+
 bool present() {
     if (!g_glctx && !g_vulkan) return false;
+#ifdef VC3_HAVE_VULKAN
+    if (g_vulkan && g_surface_reset_at.time_since_epoch().count() && Clock::now() >= g_surface_reset_at) {
+        g_surface_reset_at = {};
+        vkp::reset_surface();
+    }
+#endif
     static u64 shown_seq = 0;
     static Clock::time_point last_present{}, last_mode_check{};
     const auto now = Clock::now();
@@ -1077,7 +1297,8 @@ bool present() {
     }
     const u64 seq = g_display_seq.load(std::memory_order_acquire);
     const bool fresh = seq != shown_seq;
-    if (!g_vs_k && !fresh && now - last_present < std::chrono::milliseconds(100)) return false;
+    choose_pacing();
+    if ((!g_vs_k || g_fresh_only) && !fresh && now - last_present < std::chrono::milliseconds(100)) return false;
     last_present = now;
     static u64 uploads = 0, skipped = 0;
     static const bool tp = std::getenv("VC3_TRACE_PRESENT") != nullptr;
@@ -1092,6 +1313,30 @@ bool present() {
                          std::chrono::duration<double, std::milli>(now - last_done).count(), last_upload_ms, last_present_ms);
     }
     const auto t_up = Clock::now();
+    // A line a minute for bug reports: pictures skipped (never shown) mean uneven frame pacing;
+    // missed refreshes (a present that came back more than 1.5 refreshes after the one before) and the
+    // longest present work (picture upload + draw, before the swap) show where the time went.
+    static u64 m_missed = 0;
+    static double m_worst_work = 0, m_worst_gap = 0;
+    {
+        static u64 m_presents = 0, m_new = 0, m_skipped = 0;
+        static auto m_t0 = now;
+        ++m_presents;
+        if (fresh) {
+            ++m_new;
+            if (shown_seq && seq - shown_seq > 1) m_skipped += seq - shown_seq - 1;
+        }
+        if (now - m_t0 > std::chrono::seconds(60)) {
+            std::fprintf(stderr, "[present] last minute: %llu presents, %llu new pictures, %llu skipped; %.2f Hz display, %s%s; "
+                                 "missed refreshes %llu, longest present work %.1f ms, longest gap between presents %.1f ms\n",
+                         (unsigned long long)m_presents, (unsigned long long)m_new, (unsigned long long)m_skipped, g_refresh,
+                         g_vs_locked ? "phase-locked" : "free timer", g_present_blocks ? ", vsync" : "",
+                         (unsigned long long)m_missed, m_worst_work, m_worst_gap);
+            m_presents = m_new = m_skipped = m_missed = 0;
+            m_worst_work = m_worst_gap = 0;
+            m_t0 = now;
+        }
+    }
     if (fresh) {
         shown_seq = seq;
         u32 start;
@@ -1173,20 +1418,53 @@ bool present() {
                          g_src_from_ram ? "from guest RAM" : "from GPU");
         }
     }
+    const auto t_swap = Clock::now();
+    m_worst_work = std::max(m_worst_work, std::chrono::duration<double, std::milli>(t_swap - now).count());
 #ifdef VC3_HAVE_VULKAN
     if (g_vulkan) {
         int w = 0, h = 0;
         SDL_GetWindowSizeInPixels(g_window, &w, &h);
         float x, y, pw, ph;
         picture_rect(float(w), float(h), x, y, pw, ph);
-        vkp::present(x, y, pw, ph, overlay_rects(w, h, x, y, pw, ph));
+        std::vector<OverlayImage> images;
+        const std::vector<OverlayRect> rects = overlay_rects(w, h, x, y, pw, ph, images);
+        vkp::present(x, y, pw, ph, rects, images);
     } else
 #endif
+    {
         SDL_GL_SwapWindow(g_window);
-    last_done = Clock::now();
+        // Hard sync (OpenGL, VSync): wait here until the swap is done. Otherwise the driver queues
+        // frames ahead -- NVIDIA on Windows up to 3, plus the copy on Optimus laptops -- which adds
+        // input lag and makes the time a present returns say little about the real refresh (which
+        // the vsync lock steers by). On by default on Windows; VC3_GL_HARD_SYNC=0/1 overrides.
+        static const bool hard_sync = [] {
+            if (const char* e = std::getenv("VC3_GL_HARD_SYNC")) return std::strcmp(e, "0") != 0;
+#ifdef _WIN32
+            return true;
+#else
+            return false;
+#endif
+        }();
+        if (hard_sync && g_present_blocks && !g_dwm_mode) glFinish();
+    }
+    {
+        const auto done_at = Clock::now();
+        if (last_done.time_since_epoch().count()) {
+            const double gap = std::chrono::duration<double, std::milli>(done_at - last_done).count();
+            if (gap < 1000) {
+                m_worst_gap = std::max(m_worst_gap, gap);
+                // (only where presents follow every refresh: 60/120/180/240 Hz; elsewhere they follow the pictures)
+                if (g_vs_k && !g_fresh_only && g_present_blocks && g_refresh > 0 && gap > 1.5 * 1000.0 / g_refresh) ++m_missed;
+            }
+        }
+        last_done = done_at;
+    }
     last_upload_ms = std::chrono::duration<double, std::milli>(t_pr - t_up).count();
     last_present_ms = std::chrono::duration<double, std::milli>(last_done - t_pr).count();
-    if (g_vs_k) on_refresh(last_done);
+#ifdef _WIN32
+    if (g_dwm_lock) report_dwm_timing();
+#endif
+    if (g_vs_k && !g_dwm_lock) on_refresh(last_done);
     if (tp) {
         static u64 n = 0, base_frames = 0;
         static auto t0 = now;

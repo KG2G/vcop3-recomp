@@ -16,3 +16,4 @@ __pycache__/
 /dist/
 vc3.log
 vc3.prev.log
+vc3.crash.log

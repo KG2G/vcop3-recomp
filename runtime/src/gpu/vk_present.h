@@ -20,11 +20,14 @@ dev::Sync take_texture(dev::Tex t, int w, int h, dev::Sync ready);
 // ...or guest RAM pixels (BGRA, w x h).
 void take_ram(const void* bgra, int w, int h);
 // Draws the current picture into the window rectangle (pixels) and presents.
-void present(float x, float y, float pw, float ph, const std::vector<dev::OverlayRect>& overlay = {});
+void present(float x, float y, float pw, float ph, const std::vector<dev::OverlayRect>& overlay = {},
+             const std::vector<dev::OverlayImage>& images = {});
 // The next present also saves the window to `path` (PPM; the F9 capture).
 void request_shot(const std::string& path);
 // The current picture (BGRA rows) for screenshots.
 bool read_picture(std::vector<uint8_t>& bgra, int& w, int& h);
+// A fresh window surface and swapchain, as at startup (nothing carried over from the old ones).
+void reset_surface();
 void shutdown();
 
 }  // namespace vc3::gpu::vkp

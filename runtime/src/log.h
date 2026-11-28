@@ -14,6 +14,8 @@ void start(const std::string& dir);
 void header();
 // A crash report (what happened, the call stack on Linux), once; then the program dies.
 void crashed(const char* what);
+// Extra detail for crash reports: `fn` is called (once, in the crashing thread) after the [crash] line.
+void on_crash(void (*fn)());
 // The last line: how the session ended.
 void end(const char* how);
 // Continue the log in another folder (the data folder moved): the log so far (and vc3.prev.log)

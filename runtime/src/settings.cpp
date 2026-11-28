@@ -54,7 +54,7 @@ const std::vector<Option> kOptions = {
       {"1600x900", "1600x900"}, {"1920x1080", "1920x1080"}, {"2560x1440", "2560x1440"}, {"3840x2160", "3840x2160"}},
      "auto"},
     {"fullscreen", "VC3_FULLSCREEN", "Display", "Window",
-     "F11 or Alt+Enter switches while playing.", {{"0", "Windowed"}, {"1", "Fullscreen"}}, "0"},
+     "F11 or Alt+Enter switches while playing.", {{"0", "Windowed"}, {"1", "Fullscreen"}}, "1"},
     {"crosshair", "VC3_CROSSHAIR", "Display", "Crosshair",
      "A crosshair at each player's aim point (red player 1, blue player 2), shown while that player is "
      "in a game (from pressing start until game over; either side can play alone).",
@@ -63,6 +63,9 @@ const std::vector<Option> kOptions = {
      "Relative to the window's height (the screen's when fullscreen); 100% is 5% of it across.",
      {{"0.5", "50%"}, {"0.75", "75%"}, {"1", "100%"}, {"1.25", "125%"}, {"1.5", "150%"}, {"2", "200%"}, {"2.5", "250%"},
       {"3", "300%"}}, "1"},
+    // Custom crosshair images (file paths; empty: the built-in crosshair). Edited by their own launcher rows.
+    {"crosshair_image_p1", "VC3_CROSSHAIR_IMAGE_P1", "Display", "", "", {}, ""},
+    {"crosshair_image_p2", "VC3_CROSSHAIR_IMAGE_P2", "Display", "", "", {}, ""},
     {"sinden_border", "VC3_SINDEN_BORDER", "Display", "Sinden lightgun border",
      "A white border at the screen's edges for Sinden lightguns (their camera finds the screen by it), "
      "as thick as this share of the screen height: thicker tracks more reliably, thinner hides less "

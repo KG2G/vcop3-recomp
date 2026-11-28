@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -341,6 +342,10 @@ void warm_from_sources() {
 
 // At startup: pick the cache directory for this driver and load every program in it.
 void init_program_cache() {
+    // VC3_TEST_STARTUP_STALL_MS=N (testing): stall here like the NVIDIA Windows driver does for ~9 s on the
+    // first start of a new program file (it re-checks every program binary) -- with the game already running.
+    if (const char* st = std::getenv("VC3_TEST_STARTUP_STALL_MS"))
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(st)));
     GLint formats = 0;
     glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &formats);
     const char* env = std::getenv("VC3_SHADER_CACHE");

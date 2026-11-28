@@ -5,6 +5,7 @@
 #include "gpu/vk_device.h"
 
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -58,6 +59,7 @@ bool g_show_ram = true;
 Buf g_staging[kFrames];  // guest RAM uploads
 Buf g_readback;
 Buf g_overlay[kFrames];  // overlay colour strips
+Buf g_overlay_img[kFrames];  // overlay images (custom crosshairs)
 Buf g_shot;              // VC3_WINDOW_SHOT readback
 std::string g_shot_path;  // a capture's window shot, waiting for the next present
 bool g_sc_readable = false;
@@ -277,6 +279,28 @@ bool init(SDL_Window* window) {
 
 bool active() { return g_active; }
 
+// Windows: after a fullscreen switch the presentation stayed jumpy until a restart (the swapchain was
+// rebuilt on the same surface, handed the old one: the driver kept how it had been showing that
+// surface's frames -- through the compositor or straight to the display -- for the other mode). A
+// fresh surface and a swapchain built without the old one is what a restart does.
+void reset_surface() {
+    if (!g_active) return;
+    auto& c = dev::vk::ctx();
+    queue_idle();
+    destroy_swapchain();
+    if (c.surface) vkDestroySurfaceKHR(c.instance, c.surface, nullptr);
+    c.surface = VK_NULL_HANDLE;
+    if (!SDL_Vulkan_CreateSurface(g_window, c.instance, nullptr, &c.surface)) {
+        std::fprintf(stderr, "[present] Vulkan surface: %s\n", SDL_GetError());
+        return;
+    }
+    VkBool32 ok = VK_FALSE;
+    vkGetPhysicalDeviceSurfaceSupportKHR(c.phys, c.queue_family, c.surface, &ok);
+    if (!ok) std::fprintf(stderr, "[present] the new Vulkan surface can't be presented to\n");
+    g_need_rebuild = true;
+    std::fprintf(stderr, "[present] Vulkan surface recreated\n");
+}
+
 void set_vsync(bool block) {
     if (block == g_block) return;
     g_block = block;
@@ -373,7 +397,8 @@ void submit_without_present() {
 
 void request_shot(const std::string& path) { g_shot_path = path; }
 
-void present(float x, float y, float pw, float ph, const std::vector<dev::OverlayRect>& overlay) {
+void present(float x, float y, float pw, float ph, const std::vector<dev::OverlayRect>& overlay,
+             const std::vector<dev::OverlayImage>& images) {
     if (!g_active) return;
     int ww = 0, wh = 0;
     SDL_GetWindowSizeInPixels(g_window, &ww, &wh);
@@ -485,6 +510,53 @@ void present(float x, float y, float pw, float ph, const std::vector<dev::Overla
         }
         if (!regions.empty())
             vkCmdCopyBufferToImage(cb, g_overlay[f].buf, sc, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, uint32_t(regions.size()),
+                                   regions.data());
+    }
+    // Custom crosshair images: their pixels in a buffer, each run of drawn pixels in a row copied
+    // into the window (no blending in this copy-only path: see crosshair_image.h).
+    if (!images.empty()) {
+        global_barrier(cb);
+        size_t need = 0;
+        for (const auto& im : images) need += size_t(im.w) * size_t(im.h) * 4;
+        if (g_overlay_img[f].size < need) {
+            destroy_buf(g_overlay_img[f]);
+            g_overlay_img[f] = make_buf(need, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        }
+        const bool rgba = g_sc_fmt == VK_FORMAT_R8G8B8A8_UNORM || g_sc_fmt == VK_FORMAT_R8G8B8A8_SRGB;
+        auto* px = static_cast<uint32_t*>(g_overlay_img[f].map);
+        std::vector<VkBufferImageCopy> regions;
+        size_t base = 0;
+        const int sw = int(g_sc_ext.width), sh = int(g_sc_ext.height);
+        for (const auto& im : images) {
+            const size_t n = size_t(im.w) * size_t(im.h);
+            for (size_t i = 0; i < n; ++i) {
+                const uint32_t c = im.px[i];  // 0xAARRGGBB = B,G,R,A bytes (BGRA swapchains)
+                px[base + i] = rgba ? ((c & 0xFF00FF00u) | (c & 0xFFu) << 16 | (c >> 16 & 0xFFu)) : c;
+            }
+            for (int row = 0; row < im.h; ++row) {
+                const int wy = im.y + row;
+                if (wy < 0 || wy >= sh) continue;
+                const uint32_t* line = im.px + size_t(row) * size_t(im.w);
+                for (int x0 = 0; x0 < im.w;) {
+                    if (!(line[x0] >> 24)) { ++x0; continue; }
+                    int x1 = x0;
+                    while (x1 < im.w && (line[x1] >> 24)) ++x1;
+                    const int a = std::max(x0, -im.x), b = std::min(x1, sw - im.x);  // clip to the window
+                    if (b > a) {
+                        VkBufferImageCopy rc{};
+                        rc.bufferOffset = (base + size_t(row) * size_t(im.w) + size_t(a)) * 4;
+                        rc.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                        rc.imageOffset = {im.x + a, wy, 0};
+                        rc.imageExtent = {uint32_t(b - a), 1, 1};
+                        regions.push_back(rc);
+                    }
+                    x0 = x1;
+                }
+            }
+            base += n;
+        }
+        if (!regions.empty())
+            vkCmdCopyBufferToImage(cb, g_overlay_img[f].buf, sc, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, uint32_t(regions.size()),
                                    regions.data());
     }
     // VC3_WINDOW_SHOT=N (testing): what the window shows at the N-th present, to
@@ -613,6 +685,7 @@ void shutdown() {
     for (auto& b : g_staging) destroy_buf(b);
     destroy_buf(g_readback);
     for (auto& b : g_overlay) destroy_buf(b);
+    for (auto& b : g_overlay_img) destroy_buf(b);
     destroy_buf(g_shot);
     g_active = false;
 }

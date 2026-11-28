@@ -44,6 +44,17 @@ void wait_event(void* e, unsigned ms);
 void set_args(int argc, char** argv);
 std::vector<std::string> args();
 void relaunch(bool test_mode);
+// The calling thread's scheduling priority: kTimeCritical for the small threads whose timing the
+// game depends on (its vblank timer, the USB controller's 1 ms frames), kBackground for helpers
+// that may wait (shader compile workers). Windows only; elsewhere the defaults stay (raising needs
+// privileges on Linux, and the Steam Deck's timing is proven as is).
+enum class Priority { kTimeCritical, kBackground };
+void set_thread_priority(Priority p);
+#ifdef _WIN32
+// The desktop compositor's (DWM) timing, read without waiting: the time of its latest refresh
+// (steady clock, ns), its refresh period (ns) and refresh count. False if there is no compositor.
+bool dwm_timing(long long& vblank_ns, long long& period_ns, unsigned long long& count);
+#endif
 // setenv(name, value, overwrite=1) / unsetenv (Windows: _putenv_s).
 void set_env(const char* name, const char* value);
 void unset_env(const char* name);

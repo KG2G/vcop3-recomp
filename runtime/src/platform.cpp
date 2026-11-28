@@ -1,5 +1,6 @@
 #include "platform.h"
 
+#include <chrono>
 #include <cstdlib>
 
 #include <cstdio>
@@ -13,6 +14,7 @@
 #ifdef _WIN32
 #include <io.h>
 #include <windows.h>
+#include <dwmapi.h>
 #include <winioctl.h>
 #include <timeapi.h>
 #endif
@@ -103,6 +105,38 @@ void sleep_for(std::chrono::nanoseconds d) {
 void* make_event() { return CreateEventW(nullptr, FALSE, FALSE, nullptr); }
 void set_event(void* e) { SetEvent(static_cast<HANDLE>(e)); }
 void wait_event(void* e, unsigned ms) { WaitForSingleObject(static_cast<HANDLE>(e), ms == ~0u ? INFINITE : DWORD(ms)); }
+#endif
+
+void set_thread_priority(Priority p) {
+#ifdef _WIN32
+    SetThreadPriority(GetCurrentThread(), p == Priority::kTimeCritical ? THREAD_PRIORITY_HIGHEST : THREAD_PRIORITY_BELOW_NORMAL);
+#else
+    (void)p;
+#endif
+}
+
+#ifdef _WIN32
+bool dwm_timing(long long& vblank_ns, long long& period_ns, unsigned long long& count) {
+    using Fn = HRESULT(WINAPI*)(HWND, DWM_TIMING_INFO*);
+    static const Fn fn = [] {
+        HMODULE m = LoadLibraryW(L"dwmapi.dll");
+        return m ? reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(m, "DwmGetCompositionTimingInfo"))) : Fn(nullptr);
+    }();
+    if (!fn) return false;
+    DWM_TIMING_INFO info{};
+    info.cbSize = sizeof info;
+    if (FAILED(fn(nullptr, &info)) || !info.qpcRefreshPeriod || !info.qpcVBlank) return false;
+    LARGE_INTEGER freq, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    const long long steady =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double ns_per_tick = 1e9 / double(freq.QuadPart);
+    vblank_ns = steady - (long long)(double(now.QuadPart - (long long)info.qpcVBlank) * ns_per_tick);
+    period_ns = (long long)(double(info.qpcRefreshPeriod) * ns_per_tick);
+    count = info.cRefresh;
+    return true;
+}
 #endif
 
 void init_process() {

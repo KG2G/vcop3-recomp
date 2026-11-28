@@ -161,6 +161,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
             if (!launcher::run()) {
+                log::end("launcher closed");
                 SDL_Quit();
                 return 0;
             }
@@ -252,6 +253,7 @@ int main(int argc, char** argv) {
     if (headless) {
         kernel::ps::wait_all_threads();
         std::printf("[main] all guest threads exited\n");
+        log::end("closed (headless)");
         return 0;
     }
 
@@ -264,6 +266,15 @@ int main(int argc, char** argv) {
     const Uint64 started = SDL_GetTicks();
     while (running) {
         if (quit_after > 0 && double(SDL_GetTicks() - started) >= quit_after * 1000) running = false;
+        // VC3_TEST_F11_AT=S1,S2,... (testing): toggle fullscreen at those seconds, as F11 would.
+        if (static const char* f11 = std::getenv("VC3_TEST_F11_AT"); f11) {
+            static const char* next = f11;
+            if (*next && double(SDL_GetTicks() - started) >= std::atof(next) * 1000) {
+                gpu::toggle_fullscreen();
+                const char* comma = std::strchr(next, ',');
+                next = comma ? comma + 1 : next + std::strlen(next);
+            }
+        }
         // VC3_CAPTURE_AFTER=S (testing): an F9 capture after S seconds.
         static const double capture_after = std::getenv("VC3_CAPTURE_AFTER") ? std::atof(std::getenv("VC3_CAPTURE_AFTER")) : 0;
         static bool captured = false;

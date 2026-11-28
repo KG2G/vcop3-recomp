@@ -8,6 +8,7 @@
 #include "platform.h"
 #include "ohci.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -16,6 +17,8 @@
 #include <thread>
 
 #include "kernel/ke.h"
+#include "log.h"
+#include "vc3/memory.h"
 #include "mmio.h"
 #include "scheduler.h"
 #include "vc3/helpers.h"
@@ -25,6 +28,45 @@ namespace vc3::io::ohci {
 namespace {
 
 constexpr int kPorts = 4;
+
+// The controllers' recent history, written into the log only if the program crashes (a rare crash on
+// Windows + OpenGL in the XDK USB driver's completion code: it followed a descriptor whose next pointer
+// read 0xFFFFFFFx). Kinds: R retired TD (ed, td, next, cc/done, new head), X head changed by the driver
+// meanwhile, D done queue written to the HCCA, G register written by the driver (offset, value).
+struct Event { double t; char kind; u32 a, b, c, d, e; };
+constexpr u32 kEvents = 256;
+Event g_events[kEvents];
+std::atomic<u32> g_event_n{0};
+void note(char kind, u32 a, u32 b = 0, u32 c = 0, u32 d = 0, u32 e = 0) {
+    g_events[g_event_n.fetch_add(1, std::memory_order_relaxed) % kEvents] = Event{log::uptime(), kind, a, b, c, d, e};
+}
+void dump_events() {
+    const u32 n = g_event_n.load(), first = n > kEvents ? n - kEvents : 0;
+    std::fprintf(stderr, "[ohci] last %u controller events (R ed td next cc|done new-head; X ed old-head now-head; D hcca done-head; G reg value):\n", n - first);
+    u32 tds[16] = {};
+    int ntd = 0;
+    for (u32 i = first; i < n; ++i) {
+        const Event& e = g_events[i % kEvents];
+        std::fprintf(stderr, "  %9.4f %c %08x %08x %08x %08x %08x\n", e.t, e.kind, e.a, e.b, e.c, e.d, e.e);
+        if (e.kind == 'R') tds[ntd++ % 16] = e.b;
+    }
+    std::fprintf(stderr, "[ohci] the last retired TDs now (ctrl cbp next be | driver words):\n");
+    for (int i = 0; i < std::min(ntd, 16); ++i) {
+        const u32 td = tds[i];
+        if (!td || td + 32 > mem::kRamSize) continue;
+        std::fprintf(stderr, "  %08x: %08x %08x %08x %08x | %08x %08x %08x %08x\n", td, rd<u32>(td), rd<u32>(td + 4),
+                     rd<u32>(td + 8), rd<u32>(td + 12), rd<u32>(td + 16), rd<u32>(td + 20), rd<u32>(td + 24), rd<u32>(td + 28));
+    }
+}
+
+// Address range of the descriptors the drivers gave the controllers (see overlaps_descriptors).
+std::atomic<u32> g_desc_lo{~0u}, g_desc_hi{0};
+void note_descriptor(u32 addr, u32 size) {
+    u32 v = g_desc_lo.load(std::memory_order_relaxed);
+    while (addr < v && !g_desc_lo.compare_exchange_weak(v, addr)) {}
+    v = g_desc_hi.load(std::memory_order_relaxed);
+    while (addr + size > v && !g_desc_hi.compare_exchange_weak(v, addr + size)) {}
+}
 
 // HcControl
 constexpr u32 PLE = 1u << 2, CLE = 1u << 4, BLE = 1u << 5, HCFS_MASK = 3u << 6, HCFS_OPERATIONAL = 2u << 6;
@@ -73,11 +115,14 @@ struct Controller {
         (void)isochronous_ok;
         bool worked = false;
         for (int guard = 0; guard < 64; ++guard) {
+            if (guard && (rd<u32>(ed) & (1u << 14))) break;  // sKip set meanwhile (the driver is editing the list)
             const u32 tail = rd<u32>(ed + 4) & ~0xFu;
             u32 head = rd<u32>(ed + 8);
             if (head & 1) break;  // Halted
             const u32 td = head & ~0xFu;
             if (td == tail || !td) break;
+            note_descriptor(ed, 16);
+            note_descriptor(td, 32);  // 16 bytes for the controller + the driver's own fields after them
 
             const u32 fa = d0 & 0x7F, en = (d0 >> 7) & 0xF, ed_dir = (d0 >> 11) & 3, mps = (d0 >> 16) & 0x7FF;
             u32 t0 = rd<u32>(td);
@@ -128,15 +173,30 @@ struct Controller {
                     std::fprintf(stderr, "[ohci] %s TD %08x ep %u/%u dir %u: cc %u (%u of %u bytes, R=%u)\n", name, td, fa, en,
                                  dir, cc, done, len, (t0 >> 18) & 1);
             }
-            // Retire the TD.
+            // Retire the TD. The ED's head is advanced first, and only if the driver didn't change it
+            // while the transfer ran: this thread runs beside the guest (no guest lock), and a driver
+            // that cancelled the transfer meanwhile (a timeout: its clean-up edits HeadP and frees the
+            // TDs) must not get the old head written back over its own -- it then walked TDs it had
+            // already freed (NextTD 0xFFFFFFFF) and crashed in its completion code (fn_001ac5a4).
             const u32 toggle = ((t0 >> 25) & 1) ? ((t0 >> 24) & 1) ^ 1 : ((head >> 1) & 1) ^ 1;
+            const u32 new_head = (next & ~0xFu) | (toggle << 1) | (cc != CC_NOERROR ? 1u : 0u);
+            u32 expected = head;
+            if (!__atomic_compare_exchange_n(reinterpret_cast<u32*>(host_ptr(ed + 8)), &expected, new_head, false,
+                                             __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+                note('X', ed, head, expected);
+                static int logged = 0;
+                if (logged++ < 10)
+                    std::fprintf(stderr, "[ohci] %s: ED %08x changed by the driver during a transfer (head %08x -> %08x): "
+                                         "transfer dropped\n", name, ed, head, expected);
+                break;
+            }
+            head = new_head;
+            note('R', ed, td, next, cc << 16 | (done & 0xFFFF), new_head);
             t0 = (t0 & 0x03FFFFFFu & ~(3u << 24)) | (cc << 28) | (2u << 24) | (toggle << 24);
             wr<u32>(td, t0);
             wr<u32>(td + 4, done >= len ? 0 : addr_at(done));
             wr<u32>(td + 8, done_head);
             done_head = td;
-            head = (next & ~0xFu) | (toggle << 1) | (cc != CC_NOERROR ? 1u : 0u);
-            wr<u32>(ed + 8, head);
             worked = true;
             if (cc != CC_NOERROR) break;
         }
@@ -166,6 +226,7 @@ struct Controller {
         }
         if (done_head && !(int_status & INT_WDH) && hcca) {
             wr<u32>(hcca + 0x84, done_head);
+            note('D', hcca, done_head);
             done_head = 0;
             int_status |= INT_WDH;
         }
@@ -221,6 +282,7 @@ void write(void* ctx, u32 addr, u32 v, unsigned size) {
     auto& h = *static_cast<Controller*>(ctx);
     std::lock_guard lk(h.m);
     const u32 off = addr & 0xFFF;
+    note('G', off, v, h.vector);
     static const bool tr = std::getenv("VC3_TRACE_USB") != nullptr;
     if (tr) std::fprintf(stderr, "[ohci] %s write %#x = %08x\n", h.name, off, v);
     if (size != 4) std::fprintf(stderr, "[ohci] %s %u-byte write to %#x\n", h.name, size, off);
@@ -268,6 +330,15 @@ void write(void* ctx, u32 addr, u32 v, unsigned size) {
 
 }  // namespace
 
+bool overlaps_descriptors(uint32_t lo, uint32_t hi) {
+    const u32 dlo = g_desc_lo.load(std::memory_order_relaxed), dhi = g_desc_hi.load(std::memory_order_relaxed);
+    return dlo < dhi && lo < dhi && dlo < hi;
+}
+void descriptor_range(uint32_t& lo, uint32_t& hi) {
+    lo = g_desc_lo.load(std::memory_order_relaxed);
+    hi = g_desc_hi.load(std::memory_order_relaxed);
+}
+
 void attach(int controller, int port, usb::Device* dev) {
     auto& h = g_hc[controller];
     std::lock_guard lk(h.m);
@@ -277,10 +348,14 @@ void attach(int controller, int port, usb::Device* dev) {
 }
 
 void init() {
+    log::on_crash(dump_events);
     for (auto& h : g_hc) h.reset();
     mmio::register_range(0xFED00000, 0x1000, "usb0", read, write, &g_hc[0]);
     mmio::register_range(0xFED08000, 0x1000, "usb1", read, write, &g_hc[1]);
     std::thread([] {
+        // The game's USB driver expects a frame every millisecond; a starved controller thread makes
+        // its transfers time out, and the clean-up then races the controller (rare crash on Windows).
+        platform::set_thread_priority(platform::Priority::kTimeCritical);
         auto next = std::chrono::steady_clock::now();
         for (;;) {
             next += std::chrono::milliseconds(1);

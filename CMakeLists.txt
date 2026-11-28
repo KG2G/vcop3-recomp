@@ -48,6 +48,12 @@ FetchContent_Declare(libchdr
   GIT_SHALLOW    TRUE)
 FetchContent_MakeAvailable(miniz libchdr)
 
+# Custom crosshair images: stb_image (Sean Barrett, public domain / MIT).
+FetchContent_Declare(stb
+  GIT_REPOSITORY https://github.com/nothings/stb.git
+  GIT_TAG        6b5799bae8a1fe3792691ef4b72ae26434c3e799)
+FetchContent_MakeAvailable(stb)
+
 add_subdirectory(common)
 
 if(VC3_BUILD_RECOMPILER)

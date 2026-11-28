@@ -7,6 +7,7 @@
 #include "gpu/vk_present.h"
 #endif
 #include "io/jvs.h"
+#include "io/ohci.h"
 
 #include <atomic>
 #include <chrono>
@@ -221,6 +222,24 @@ std::mutex g_ram_write_m;
 void write_ram(ColorSurface& cs, const u32* px) {
     std::lock_guard write_lock(g_ram_write_m);
     const Surface& s = cs.desc;
+    {
+        // Guard: a write-back must never land on the USB driver's descriptors. (Windows + OpenGL crashed
+        // 4 times in the XDK USB driver following a descriptor whose next pointer read 0xFFFFFFFx --
+        // what a white pixel looks like. If this triggers, the log says which surface did it.)
+        const u32 lo = s.color_base & (mem::kRamSize - 1), hi = lo + u32(cs.bytes());
+        if (io::ohci::overlaps_descriptors(lo, hi)) {
+            static int logged = 0;
+            if (logged++ < 10) {
+                u32 dlo, dhi;
+                io::ohci::descriptor_range(dlo, dhi);
+                std::fprintf(stderr, "[gl] write-back of surface %08x (%dx%d, pitch %u, format %u%s, %zu bytes) overlaps USB "
+                                     "descriptors %08x-%08x: not written\n",
+                             s.color_base, s.width, s.height, s.color_pitch, s.color_fmt, s.swizzled ? ", swizzled" : "",
+                             size_t(cs.bytes()), dlo, dhi);
+            }
+            return;
+        }
+    }
     if (!s.swizzled && s.color_bpp() == 4) {
         for (int y = 0; y < s.height; ++y) {
             u8* row = ram(s.color_base + u32(y) * s.color_pitch);

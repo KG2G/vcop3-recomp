@@ -98,11 +98,15 @@ std::string os_name() {
 #endif
 }
 
+void (*g_crash_fns[4])() = {};
+
 void crash(const char* what) {
     static volatile std::sig_atomic_t once = 0;
     if (once) return;
     once = 1;
     std::fprintf(stderr, "[crash] %s after %.1f s\n", what, uptime());
+    for (auto fn : g_crash_fns)
+        if (fn) fn();
 #ifndef _WIN32
     void* bt[32];
     const int n = backtrace(bt, 32);
@@ -154,11 +158,32 @@ double uptime() {
 Sink g_err{-1, -1}, g_out{-1, -1};  // console + log file behind stderr / stdout (start())
 #endif
 
+// A run that didn't close normally -- a crash, a freeze the player had to end, an error at startup --
+// leaves a log without the closing "[log] ... after N s" line (or with a [crash] line). Two more starts
+// would rotate it away, often before anyone looks, so it is kept as vc3.crash.log (until the next such run).
+static bool keep_if_failed(const std::filesystem::path& log, const std::filesystem::path& keep) {
+    std::ifstream in(log, std::ios::binary);
+    if (!in) return false;
+    std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+    if (s.empty()) return false;
+    const size_t nl = s.find_last_of('\n');
+    const std::string last = nl == std::string::npos ? s : s.substr(nl + 1);
+    const bool closed = last.rfind("[log] ", 0) == 0 && last.find(" after ") != std::string::npos;
+    const bool crashed = s.rfind("[crash]", 0) == 0 || s.find("\n[crash]") != std::string::npos;
+    if (closed && !crashed) return false;
+    std::error_code ec;
+    std::filesystem::copy_file(log, keep, std::filesystem::copy_options::overwrite_existing, ec);
+    return !ec;
+}
+
 void start(const std::string& dir) {
     namespace fs = std::filesystem;
     std::error_code ec;
     const fs::path log = fs::path(dir) / "vc3.log";
     g_folder = fs::absolute(dir, ec).string();
+    const bool kept = keep_if_failed(log, fs::path(dir) / "vc3.crash.log");
     fs::rename(log, fs::path(dir) / "vc3.prev.log", ec);
 #ifdef _WIN32
     // Windows: a GUI program without a console; both streams append to the file.
@@ -186,6 +211,7 @@ void start(const std::string& dir) {
     }
 #endif
     for (int sig : {SIGABRT, SIGFPE, SIGILL}) std::signal(sig, on_signal);
+    if (kept) std::fprintf(stderr, "[log] the previous run didn't close normally: its log is kept as vc3.crash.log\n");
 }
 
 void move_to(const std::string& dir) {
@@ -200,6 +226,8 @@ void move_to(const std::string& dir) {
     fs::copy_file(from / "vc3.log", to / "vc3.log", fs::copy_options::overwrite_existing, ec);
     if (ec) return;  // (keep writing where we are)
     fs::copy_file(from / "vc3.prev.log", to / "vc3.prev.log", fs::copy_options::overwrite_existing, ec);
+    if (fs::exists(from / "vc3.crash.log", ec))
+        fs::copy_file(from / "vc3.crash.log", to / "vc3.crash.log", fs::copy_options::overwrite_existing, ec);
     const std::string p = (to / "vc3.log").string();
 #ifdef _WIN32
     if (std::freopen(p.c_str(), "a", stderr)) std::setvbuf(stderr, nullptr, _IONBF, 0);
@@ -212,6 +240,7 @@ void move_to(const std::string& dir) {
 #endif
     fs::remove(from / "vc3.log", ec);
     fs::remove(from / "vc3.prev.log", ec);
+    fs::remove(from / "vc3.crash.log", ec);
     g_folder = to.string();
 }
 
@@ -231,6 +260,7 @@ void header() {
     for (const auto& o : settings::options()) {
         std::string v = settings::get(o.key);
         if (!std::strcmp(o.key, "install_dir")) v = v.empty() ? "default" : "custom";  // (no paths)
+        if (!std::strncmp(o.key, "crosshair_image", 15)) v = v.empty() ? "none" : "custom";
         s += std::string(" ") + o.key + "=" + v;
     }
     std::fprintf(stderr, "[log] settings:%s\n", s.c_str());
@@ -238,6 +268,10 @@ void header() {
 }
 
 void crashed(const char* what) { crash(what); }
+void on_crash(void (*fn)()) {
+    for (auto& f : g_crash_fns)
+        if (!f) { f = fn; return; }
+}
 
 void end(const char* how) {
     std::fprintf(stderr, "[log] %s after %.0f s\n", how, uptime());

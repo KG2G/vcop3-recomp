@@ -35,7 +35,7 @@ Command-line options and environment variables: [docs/OPTIONS.md](docs/OPTIONS.m
 
 - **Settings**: renderer (OpenGL / Vulkan), 3D resolution (Match display or 1x-8x), aspect
   ratio (4:3, 16:9, 16:10, 21:9) with the HUD at the screen edges, anisotropic filtering, SMAA,
-  window size, windowed / fullscreen, crosshair and its size, Sinden lightgun border, vsync,
+  window size, windowed / fullscreen, crosshair, its size and a custom crosshair image per player, Sinden lightgun border, vsync,
   sound, free play, cheats (infinite ammo / lives / E.S. slow motion, start at the final stage, a
   starting weapon or all of them).
 - **Controls**: per player, the aim device (system mouse, a gamepad stick, one specific mouse or
@@ -92,8 +92,9 @@ OpenGL 4.5, and needs Windows 10 version 1803 or newer.
 
 ## Third-party code
 
-Fetched at build time: Zydis, Dear ImGui, miniz, libchdr, and SMAA (Jorge Jimenez et al., MIT
-licence: the reference shader and its lookup tables).
+Fetched at build time: Zydis, Dear ImGui, miniz, libchdr, stb_image (Sean Barrett, public domain:
+custom crosshair images), and SMAA (Jorge Jimenez et al., MIT licence: the reference shader and its
+lookup tables).
 
 Virtua Cop 3 is a trademark of Sega. This project contains no Sega code or data; it only works
 with a dump you supply.

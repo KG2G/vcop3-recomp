@@ -8,6 +8,7 @@
 // writing a texture that was read, ...). Rendering uses dynamic rendering; everything
 // the NV2A changes per draw is dynamic state except blending, colour masks, vertex
 // layouts and topology, which select a cached pipeline (saved across runs).
+#include "platform.h"
 #include "gpu/vk_device.h"
 #include "gpu/gl_device.h"
 #include "gpu/pipe_recipe.h"  // shader_store
@@ -898,6 +899,7 @@ private:
         void start(int n) {
             for (int i = 0; i < n; ++i)
                 threads.emplace_back([this] {
+                    platform::set_thread_priority(platform::Priority::kBackground);  // never ahead of the game
                     for (;;) {
                         std::function<void()> job;
                         {

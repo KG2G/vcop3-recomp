@@ -1,3 +1,4 @@
+#include "gpu/crosshair_image.h"
 #include "platform.h"
 #include "launcher.h"
 #include "log.h"
@@ -9,6 +10,7 @@
 #include <imgui_impl_sdlrenderer3.h>
 
 #include <algorithm>
+#include <cstdarg>
 #include <mutex>
 #include <cstdio>
 #include <cstdlib>
@@ -30,6 +32,20 @@ bool vulkan_built() {
 #else
     return false;
 #endif
+}
+
+// Tooltips wrap at a readable width (ImGui's own run on in one line across the screen).
+void tooltip(const char* fmt, ...) {
+    char buf[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    ImGui::BeginTooltip();
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+    ImGui::TextUnformatted(buf);
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
 }
 
 void style(float scale) {
@@ -126,7 +142,7 @@ void controls_page(float label_w) {
                 if (ImGui::Selectable(c.label, cur == c.value)) settings::set(o.key, c.value);
             ImGui::EndCombo();
         }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", o.help);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) tooltip("%s", o.help);
         ImGui::PopID();
     }
     static std::vector<io::input::Device> devices;
@@ -187,7 +203,7 @@ void controls_page(float label_w) {
             ImGui::Button(cap ? "Press a key, mouse or gamepad button... (Esc cancels)" : pretty_list(settings::get(k.c_str())).c_str(),
                           ImVec2(tw, 0));
             ImGui::PopStyleVar();
-            if (!cap && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", pretty_list(settings::get(k.c_str())).c_str());
+            if (!cap && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) tooltip("%s", pretty_list(settings::get(k.c_str())).c_str());
             ImGui::SameLine();
             if (ImGui::Button("Set", ImVec2(bw, 0))) g_cap = {p, a, false, SDL_GetTicks()};
             ImGui::SameLine();
@@ -242,7 +258,59 @@ void controls_page(float label_w) {
 
 // ---------------------------------------------------------------- game files page
 std::mutex g_pick_m;
-std::string g_picked[3];  // set by the file dialog callbacks (any thread): zip, chd, install folder
+std::string g_picked[5];  // set by the file dialog callbacks (any thread): zip, chd, install folder, crosshair P1/P2
+
+void SDLCALL on_pick(void* which, const char* const* list, int);
+
+// The crosshair image rows of the Display section (a file per player; empty: the built-in crosshair).
+void crosshair_image_rows(SDL_Window* win, float label_w) {
+    static const SDL_DialogFileFilter kImages[] = {{"Images", "png;bmp;tga;jpg;jpeg;gif"}, {"All files", "*"}};
+    for (int p = 0; p < 2; ++p) {
+        const char* key = p == 0 ? "crosshair_image_p1" : "crosshair_image_p2";
+        {
+            std::lock_guard lk(g_pick_m);
+            if (!g_picked[3 + p].empty()) {
+                settings::set(key, g_picked[3 + p]);
+                g_picked[3 + p].clear();
+            }
+        }
+        const std::string cur = settings::get(key);
+        const bool locked = settings::overridden(key);
+        ImGui::PushID(p);
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("Crosshair image P%d", p + 1);
+        const char* help = "An image (PNG, BMP, TGA, JPG or GIF) drawn as this player's crosshair, centred on the aim. "
+                           "One larger than the crosshair size is scaled down to fit (Crosshair size sets how big); a "
+                           "smaller one is drawn pixel for pixel. Transparent parts stay see-through. Default: the built-in "
+                           "crosshair (red for player 1, blue for player 2).";
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) tooltip("%s", help);
+        ImGui::SameLine(label_w);
+        const float bw = ImGui::CalcTextSize("Browse...").x + ImGui::GetStyle().FramePadding.x * 2;
+        const float cw = ImGui::CalcTextSize("Default").x + ImGui::GetStyle().FramePadding.x * 2;
+        std::string shown = "Built-in";
+        if (!cur.empty()) {
+            shown = std::filesystem::path(cur).filename().string();
+            int w = 0, h = 0;
+            shown += vc3::gpu::crosshair::probe(cur.c_str(), w, h) ? " (" + std::to_string(w) + "x" + std::to_string(h) + ")"
+                                                         : " (can't be read: built-in is used)";
+        }
+        ImGui::BeginDisabled(locked);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - bw - cw - 2 * ImGui::GetStyle().ItemSpacing.x);
+        char buf[512];
+        std::snprintf(buf, sizeof buf, "%s", shown.c_str());
+        ImGui::InputText("##img", buf, sizeof buf, ImGuiInputTextFlags_ReadOnly);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) tooltip("%s", cur.empty() ? help : cur.c_str());
+        ImGui::SameLine();
+        if (ImGui::Button("Browse...", ImVec2(bw, 0)))
+            SDL_ShowOpenFileDialog(on_pick, reinterpret_cast<void*>(intptr_t(3 + p)), win, kImages, 2, nullptr, false);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(cur.empty());  // (already the built-in crosshair)
+        if (ImGui::Button("Default", ImVec2(cw, 0))) settings::set(key, "");
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        ImGui::PopID();
+    }
+}
 install::Files g_files;
 bool g_press_main = false;  // (testing: VC3_LAUNCHER_AUTOINSTALL presses the main button)
 // An install finished in this session: show the Settings tab once and say the game is ready, so
@@ -340,7 +408,7 @@ void game_files_page(SDL_Window* win, float label_w) {
             apply_location(buf);  // everything goes there (portable)
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-            ImGui::SetTooltip("Where everything goes: the game files (about 500 MB, with saves and shader caches),\n"
+            tooltip("Where everything goes: the game files (about 500 MB, with saves and shader caches),\n"
                               "settings.ini and vc3.log. A folder of your own keeps it all together (portable);\n"
                               "Default is the per-user data folder. After changing it, press INSTALL (or move the\n"
                               "work folder over).");
@@ -365,7 +433,7 @@ void game_files_page(SDL_Window* win, float label_w) {
         }
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled | ImGuiHoveredFlags_DelayShort))
-            ImGui::SetTooltip("Install the game files again from the zip and CHD above.");
+            tooltip("Install the game files again from the zip and CHD above.");
     } else if (!busy && pr.state != 3) {
         ImGui::TextDisabled(g_files.pic.empty() || g_files.chd.empty() ? "Pick both files, then press INSTALL."
                                                                        : "Press INSTALL below.");
@@ -460,9 +528,39 @@ void update_window() {
 
 bool run() {
     settings::load();
-    const float scale = std::max(1.0f, SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()));
-    SDL_Window* win = SDL_CreateWindow("Virtua Cop 3 (recomp) - Launcher", int(960 * scale), int(820 * scale),
+    const SDL_DisplayID display = SDL_GetPrimaryDisplay();
+    const float scale = std::max(1.0f, SDL_GetDisplayContentScale(display));
+    // Fit the display: the launcher is laid out for 960x820 (times the display scale), more than small
+    // screens have -- a 640x480 / 800x480 / 800x600 arcade CRT cut off the bottom (INSTALL, PLAY). There the
+    // UI shrinks to fit, but not below the font's own pixel size (80%: smaller blurs it); what still doesn't
+    // fit scrolls (the pages scroll, the buttons stay at the bottom) in a window that fills the screen.
+    SDL_Rect area{0, 0, 0, 0};
+    if (!SDL_GetDisplayUsableBounds(display, &area) || area.w <= 0 || area.h <= 0) {
+        if (const SDL_DisplayMode* m = SDL_GetCurrentDisplayMode(display)) area = SDL_Rect{0, 0, m->w, m->h};
+    }
+    if (const char* d = std::getenv("VC3_LAUNCHER_DISPLAY")) {  // (testing) pretend the display is WxH
+        int w = 0, h = 0;
+        if (std::sscanf(d, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) area = SDL_Rect{0, 0, w, h};
+    }
+    float ui = scale;
+    int win_w = int(960 * scale), win_h = int(820 * scale);
+    bool fill = false;
+    if (area.w > 0 && area.h > 0) {
+        const float room_w = float(area.w) * 0.96f;
+        const float room_h = float(area.h) - 40.0f * scale;  // the title bar
+        const float fit = std::min({1.0f, room_w / float(win_w), room_h / float(win_h)});
+        if (fit < 1.0f) {
+            ui = scale * std::max(fit, 0.8f);
+            fill = fit < 0.8f;
+            win_w = std::max(320, int(std::min(960 * ui, room_w)));
+            win_h = std::max(240, int(std::min(820 * ui, room_h)));
+        }
+        std::fprintf(stderr, "[launcher] display %dx%d usable: window %dx%d, UI %.0f%%%s\n", area.w, area.h, win_w, win_h,
+                     ui * 100 / scale, fill ? ", scrolls" : "");
+    }
+    SDL_Window* win = SDL_CreateWindow("Virtua Cop 3 (recomp) - Launcher", win_w, win_h,
                                        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    if (win && fill && !std::getenv("VC3_LAUNCHER_DISPLAY")) SDL_MaximizeWindow(win);  // all of a small screen
     if (!win) {
         std::fprintf(stderr, "[launcher] window: %s\n", SDL_GetError());
         return true;  // no launcher: start with the saved settings
@@ -480,8 +578,8 @@ bool run() {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;  // our own settings file, not imgui.ini
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
-    io.FontGlobalScale = 1.25f * scale;
-    style(scale);
+    io.FontGlobalScale = 1.25f * ui;
+    style(ui);
     ImGui_ImplSDL3_InitForSDLRenderer(win, ren);
     ImGui_ImplSDLRenderer3_Init(ren);
 
@@ -522,6 +620,9 @@ bool run() {
         }
         ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
+        // VC3_LAUNCHER_MOUSE=x,y (testing): the mouse rests there (tooltips for screenshots).
+        if (const char* m = std::getenv("VC3_LAUNCHER_MOUSE"); m && std::strchr(m, ','))
+            io.AddMousePosEvent(float(std::atof(m)), float(std::atof(std::strchr(m, ',') + 1)));
         ImGui::NewFrame();
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(io.DisplaySize);
@@ -574,9 +675,10 @@ bool run() {
             }
             ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled | ImGuiHoveredFlags_DelayShort)) {
-                if (locked) ImGui::SetTooltip("Set by %s=%s in the environment", o.env, cur.c_str());
-                else if (*o.help) ImGui::SetTooltip("%s", o.help);
+                if (locked) tooltip("Set by %s=%s in the environment", o.env, cur.c_str());
+                else if (*o.help) tooltip("%s", o.help);
             }
+            if (!std::strcmp(o.key, "crosshair_size")) crosshair_image_rows(win, label_w);
         }
         ImGui::EndChild();
         ImGui::EndTabItem();
@@ -599,6 +701,7 @@ bool run() {
             failed_shown = failed;
             if (ImGui::BeginTabItem("Game files", nullptr, missing || show_failure ? ImGuiTabItemFlags_SetSelected : 0)) {
                 ImGui::BeginChild("files", ImVec2(0, -footer));
+                if (std::getenv("VC3_LAUNCHER_SCROLL") && ImGui::GetFrameCount() > 3) ImGui::SetScrollY(ImGui::GetScrollMaxY());
                 game_files_page(win, label_w);
                 ImGui::EndChild();
                 ImGui::EndTabItem();
@@ -652,7 +755,7 @@ bool run() {
         if (!log::folder().empty()) {
             if (ImGui::SmallButton("Open log folder")) SDL_OpenURL(("file://" + log::folder()).c_str());
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("vc3.log describes your system, settings and any problems (no names or folder paths).\n"
+                tooltip("vc3.log describes your system, settings and any problems (no names or folder paths).\n"
                                   "Attach it when reporting a problem.");
             ImGui::SameLine();
         }
@@ -699,7 +802,8 @@ bool run() {
         const bool update_busy = updater::state() == updater::State::kChecking || updater::state() == updater::State::kDownloading;
         idle_frames = install::progress().state == 1 || update_busy ? 0 : idle_frames + 1;
         if (const char* shot = std::getenv("VC3_LAUNCHER_SHOT");
-            shot && !shot_taken && ImGui::GetFrameCount() >= 20 && idle_frames >= 10) {
+            shot && !shot_taken && ImGui::GetFrameCount() >= 20 && idle_frames >= 10 &&
+            (!std::getenv("VC3_LAUNCHER_MOUSE") || ImGui::GetTime() >= 1.0)) {  // (a tooltip needs a moment)
             shot_taken = true;
             if (SDL_Surface* s = SDL_RenderReadPixels(ren, nullptr)) {
                 SDL_Surface* rgb = SDL_ConvertSurface(s, SDL_PIXELFORMAT_RGB24);

@@ -221,6 +221,15 @@ struct OverlayRect {
     int x, y, w, h;
     u8 r, g, b;
 };
+// A picture drawn over the window's picture (a custom crosshair): top-left corner in window pixels,
+// w x h pixels 0xAARRGGBB, rows top-down; alpha 0 = not drawn, 255 = drawn (see crosshair_image.h).
+// `slot` and `version` let a renderer keep an uploaded copy until the picture changes.
+struct OverlayImage {
+    int x, y, w, h;
+    const uint32_t* px;
+    int slot;
+    uint64_t version;
+};
 
 // The GPU thread's device (created on that thread by the renderer). nullptr until then.
 Device* device();
